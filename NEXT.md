@@ -1,5 +1,24 @@
 # 0.2.0 — driving the module
 
+> **Reading this cold?** The one-paragraph version: this PoC loads
+> `delivery_module` but never calls it. Calling a module directly from a
+> Qt-free consumer does not work (§"The mechanism, pinned down"). The design
+> everyone else uses is to go through `core_service`, a gateway module that
+> proxies calls. The endgoal is to host that gateway inside this addon
+> (§"Option 3 in full"); the next concrete step is to confirm the gateway
+> design works at all, using a real `logosctl` daemon (§"Confirm with the CLI
+> first" — currently unfinished, and exactly where to pick up).
+>
+> Everything below was run, not reasoned. Repro targets:
+> `make probe-transport`, `make probe-sdk`, `make probe-core-service`.
+>
+> Source read for this, all under `~/src/logos-co/`:
+> `logos-logoscore-cli/src/client/client.cpp` (how the CLI calls),
+> `…/src/core_service/core_service_dispatch.cpp` (the gateway's methods),
+> `…/src/daemon/daemon.cpp:571` (how it is registered),
+> `…/docs/logosctl.md` (daemon config, tokens, transports),
+> `logos-liblogos/src/logos_core/module_manager.cpp:294` (trusted callers).
+
 0.1.0 proves the packaging: an AppImage that brings up `delivery_module` and its
 dependency chain on a machine with no Nix. It never calls the module. 0.2.0 was
 meant to close that gap — `createNode()`, a real Waku node, a log that keeps
@@ -203,17 +222,118 @@ In order of how well-trodden the path is:
    nothing. The blocker is that `capability_module` publishes no methods over a
    plain transport, so the token lookup has nothing to reach. See "The
    mechanism, pinned down" above.
-3. **Wrap `LogosAPIClient` in the addon.** Abandons the Qt-free premise and puts
-   the Qt invocation layer back in C++, but it is what liblogos itself uses, so
-   it is known to work. Bigger change: async results, event subscription and Qt
-   types all have to cross into JS.
+3. **Host `core_service` in the addon — the likely endgoal.** See below.
 4. **Upstream: publish `capability_module` over plain transport.** Would make
    the SDK route work as originally hoped, and `make probe-sdk` is the check for
    whether it has happened.
 
-**Option 1 is the one to take.** It is the supported path, it is what the Python
-wrapper ships today, and it needs no upstream change. Option 3 is the fallback
-if spawning a subprocess per call is unacceptable.
+## Option 3 in full: be the daemon
+
+The endgoal is that the Electron app *is* the runtime — no `logosctl` process
+beside it, no subprocess per call, one binary in the AppImage that already
+loads modules and can also call them.
+
+`logosctl`'s daemon does exactly this in about five lines (`daemon.cpp:571`):
+
+```cpp
+// 7. Register core_service as an in-process module via the C++ SDK.
+auto* coreServiceApi  = new LogosAPI("core_service", coreTransports);
+auto* coreServiceImpl = new CoreServiceImpl();
+…
+provider->registerObject("core_service", static_cast<LogosProviderObject*>(coreServiceImpl));
+```
+
+`CoreServiceImpl` is the gateway every client talks to, and its dispatch
+(`core_service_dispatch.cpp`) is a plain `if (methodName == …)` chain over
+`nlohmann::json` — explicitly headed **"Universal interface — Qt-free
+dispatch"**. The part this PoC needs is small:
+
+```cpp
+callModuleMethod(module, method, args)    // proxy any module call
+watchModuleEvents(module, event)          // the event stream the log pane wants
+loadModule / getStatus / listModules      // already covered by the C ABI here
+```
+
+**What that means for this addon.** It already links `liblogos_core` and ships
+`liblogos_protocol`; the missing piece is the C++ SDK's `LogosAPI` /
+`LogosProviderObject`, and an implementation of the two methods above. The
+addon then hands JS a real `call(module, method, args)` — no daemon, no
+subprocess, no second copy of the runtime in the AppImage.
+
+It is C++ work, and it is not an "import": `invokeRemoteMethod` is a
+`LogosAPIClient` method over QRemoteObjects, so the invocation path cannot be
+lifted into koffi. But it is a known-good design with a reference
+implementation to follow, which is what makes it the endgoal rather than a
+gamble.
+
+**Confirm with the CLI first.** Before writing any of it, `make
+probe-core-service` should show a JS consumer driving a module through a real
+`logosctl` daemon's `core_service` over TCP. That validates the whole
+assumption — gateway reachable, token accepted, `callModuleMethod` proxying —
+at the cost of one config file. If it fails there, hosting the same gateway
+in-process will not fare better, and that is worth knowing before committing to
+the C++.
+
+**Status of that confirmation: not yet obtained.** The daemon starts and binds
+`core_service` on 7001 and `capability_module` on 7002, but a JS client sees
+`getMethods() -> 0 methods` and no answer — the same signature as calling a
+module directly. Two things still to rule out:
+
+- The transport list *replaces* the default rather than adding to it, so a
+  `tcp`-only config leaves `logosctl`'s own client unable to find its daemon
+  (`NO_DAEMON: no local endpoint at /tmp/logos_core_service_<instance>`).
+  Listing `local` and `tcp` together is accepted by the validator (the
+  protocol name is `local`, not `local_socket`), but the daemon then failed to
+  come up at all — no ports, no socket. Its log
+  (`~/.logosctl/logs/daemon_<timestamp>.log`) stops mid-startup with no error:
+
+  ```
+  [info] Inter-module access enforcement is OFF (no access policy set)
+  [info] [logos] Granting host services to 'capability_module': …
+  [out]  [capability_module] … Granting host services to capability_module: …
+  ```
+
+  …and nothing after. A tcp-only config *does* bind both ports, so the
+  two-transports-per-module case is the thing that breaks. **This is the first
+  thing to debug.**
+- Whether the SDK needs `LOGOS_INSTANCE_ID` set. `client.cpp` sets it for
+  LocalSocket dialing and notes TCP clients do not need it; that is worth
+  re-reading if the above is fixed and calls still hang.
+
+### Picking that up
+
+Everything needed is in the tree. `logosctl` is built at `./logosctl/bin/logosctl`
+(from `nix build ~/src/logos-co/logos-logoscore-cli#ctl`), and
+`scripts/daemon-node.yaml` is the daemon config.
+
+```bash
+./logosctl/bin/logosctl daemon config set scripts/daemon-node.yaml
+./logosctl/bin/logosctl daemon start          # watch this: it has been dying silently
+./logosctl/bin/logosctl daemon status         # 4 modules loaded when healthy
+ss -ltn | grep -E ':700[12]'                  # core_service 7001, capability 7002
+
+# the token the daemon issues itself, which the JS client needs
+cat ~/.logosctl/client/auto.json              # -> .token
+
+PROBE_TOKEN=<that token> nix develop --no-write-lock-file \
+  ~/src/logos-co/logos-liblogos -c node scripts/probe-core-service.js
+```
+
+`scripts/probe-core-service.js` connects as a JS consumer, calls `getStatus()`
+(does the gateway answer at all?), then
+`callModuleMethod('delivery_module', 'getAvailableConfigs', [])` (does the proxy
+work?). Both currently fail at the first step.
+
+Useful details already paid for:
+
+- The daemon session lives in `~/.logosctl/`: `client/auto.json` (token,
+  rewritten each boot), `client/config.yaml`, `daemon/config.yaml`, `logs/`.
+- `insecure_tcp: true` is required for plaintext TCP; the daemon refuses
+  plaintext listeners otherwise.
+- Transport protocol names are `local`, `tcp`, `tcp_ssl` — the validator says so
+  by name when wrong, which is the fastest way to check any config key.
+- `logosctl daemon config set` validates through the daemon's own loader before
+  writing, so a rejected document never lands.
 
 ## Also worth knowing
 

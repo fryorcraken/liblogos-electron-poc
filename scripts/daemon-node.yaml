@@ -1,0 +1,36 @@
+# logosctl daemon config for the core_service probe.
+#
+# Plain TCP on loopback, so logos-js-sdk (which speaks tcp / tcp_ssl, not
+# LocalSocket) can reach the daemon's RPC gateway. insecure_tcp must be set
+# explicitly: the daemon refuses plaintext listeners otherwise, and the docs
+# warn that plaintext tcp off-loopback puts tokens on the wire in cleartext.
+# This is 127.0.0.1 only, for a probe.
+insecure_tcp: true
+
+modules:
+  # The RPC gateway. logosctl's own client talks only to this, and it proxies
+  # every module call — callModuleMethod(module, method, args).
+  #
+  # BOTH transports. Naming only tcp here replaces the default local socket
+  # rather than adding to it, and logosctl's own client then cannot find its
+  # own daemon:
+  #
+  #   NO_DAEMON: no local endpoint at /tmp/logos_core_service_<instance>
+  #
+  # Keeping local_socket first preserves the CLI, while the tcp listener is what
+  # logos-js-sdk can actually speak.
+  core_service:
+    - protocol: local
+    - protocol: tcp
+      host: 127.0.0.1
+      port: 7001
+      codec: json
+
+  # Its own port: two QTcpServers cannot share an address:port, and the client
+  # dials capability_module separately for a per-target token.
+  capability_module:
+    - protocol: local
+    - protocol: tcp
+      host: 127.0.0.1
+      port: 7002
+      codec: json

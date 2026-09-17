@@ -57,7 +57,7 @@ ELECTRON_GYP = npx node-gyp rebuild --target=$(ELECTRON_VERSION) \
 # plus capability_module, which core brings up on its own at start().
 LGX_DIRS = cap-lgx delivery-lgx rln-lgx lez-rln-lgx lez-core-lgx
 
-.PHONY: build build-electron smoke verify run bundle appimage modules probe-transport probe-sdk clean
+.PHONY: build build-electron smoke verify run bundle appimage modules probe-transport probe-sdk probe-core-service clean
 
 build:
 	$(SHELL_RUN) env LOGOS_LIBLOGOS_ROOT=$(LOGOS_LIBLOGOS_ROOT) npx node-gyp rebuild
@@ -121,6 +121,19 @@ probe-transport: build
 # The next question: can logos-js-sdk actually call the module over that port?
 probe-sdk: build
 	$(SHELL_RUN) env QT_QPA_PLATFORM=offscreen node scripts/probe-sdk.js
+
+# The one that matters: reach a module THROUGH the daemon's core_service gateway,
+# which is how logosctl itself does it. Starts a daemon on plain TCP, installs
+# the modules, then drives it from Node. See scripts/probe-core-service.js.
+LOGOSCTL = ./logosctl/bin/logosctl
+
+probe-core-service:
+	$(LOGOSCTL) daemon config set scripts/daemon-node.yaml
+	$(LOGOSCTL) daemon start
+	$(LOGOSCTL) package install --dir $(CURDIR)/modules -y || true
+	$(LOGOSCTL) module load $(MODULE) || true
+	$(SHELL_RUN) node scripts/probe-core-service.js; \
+		status=$$?; $(LOGOSCTL) daemon stop || true; exit $$status
 
 clean:
 	rm -rf build dist runtime-bundle
