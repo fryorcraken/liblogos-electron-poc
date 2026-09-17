@@ -237,8 +237,11 @@ thread that called `logos_core_start()`. Every binding here is therefore
 synchronous and main-thread-only, so **a module bring-up freezes the UI** — 59 ms
 for delivery's whole chain, but a heavier module would be visible.
 
-A real app would put the runtime on its own thread owning a Qt event loop, or in
-a helper process. Neither is needed to demonstrate that the API works.
+**Not by moving the runtime to its own Qt thread**, which this README used to
+suggest. That was tested for 0.3.0 and it hangs: Qt's socket notifiers stay
+affined to the thread that created them, so a dedicated `QEventLoop::exec()`
+never services them. The working answers are an async worker off the JS thread,
+or a helper process. See [`docs/0.3.0-inventory.md`](./docs/0.3.0-inventory.md).
 
 ### Two ABIs, two builds
 
