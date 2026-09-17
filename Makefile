@@ -36,7 +36,11 @@ MODULE ?= delivery_module
 # because liblogos' own Qt dependencies reach for private symbols that only
 # their matching Qt exports. One Qt, everywhere, is the whole requirement.
 LIBLOGOS_FLAKE ?= $(HOME)/src/logos-co/logos-liblogos
-SHELL_RUN = nix develop $(LIBLOGOS_FLAKE) -c
+
+# --no-write-lock-file: when LIBLOGOS_FLAKE is a github: URL (as it is in CI),
+# the flake is read-only, and any lock entry Nix wants to refresh becomes a hard
+# error — "cannot write modified lock file". Harmless for a local checkout.
+SHELL_RUN = nix develop --no-write-lock-file $(LIBLOGOS_FLAKE) -c
 
 # Electron embeds its own Node/V8 ABI, so a .node built for the system Node
 # will not load in it ("was compiled against a different Node.js version").

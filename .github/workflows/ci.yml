@@ -38,16 +38,21 @@ jobs:
       # Build liblogos and every module package. These are the slow steps —
       # delivery pulls in Waku and RLN, which compile from source.
       - name: Build liblogos
-        run: nix build 'github:logos-co/logos-liblogos' -o ./liblogos
+        run: nix build --no-write-lock-file 'github:logos-co/logos-liblogos' -o ./liblogos
 
+      # --no-write-lock-file: the delivery-module flake carries lock entries Nix
+      # wants to refresh, and a flake fetched from GitHub is read-only, so the
+      # attempt is a hard error ("cannot write modified lock file"). The flag
+      # keeps the resolution in memory. It does not weaken pinning — every input
+      # still resolves through the flake's own committed lock.
       - name: Build package manager and modules
         run: |
-          nix build 'github:logos-co/logos-package-manager#cli' -o lgpm
-          nix build 'github:logos-co/logos-capability-module#lgx' -o cap-lgx
-          nix build 'github:logos-co/logos-delivery-module#lgx' -o delivery-lgx
-          nix build 'github:logos-co/logos-delivery-module#liblogos_rln_module-lgx' -o rln-lgx
-          nix build 'github:logos-co/logos-delivery-module#liblogos_lez_rln_module-lgx' -o lez-rln-lgx
-          nix build 'github:logos-co/logos-delivery-module#lez_core-lgx' -o lez-core-lgx
+          nix build --no-write-lock-file 'github:logos-co/logos-package-manager#cli' -o lgpm
+          nix build --no-write-lock-file 'github:logos-co/logos-capability-module#lgx' -o cap-lgx
+          nix build --no-write-lock-file 'github:logos-co/logos-delivery-module#lgx' -o delivery-lgx
+          nix build --no-write-lock-file 'github:logos-co/logos-delivery-module#liblogos_rln_module-lgx' -o rln-lgx
+          nix build --no-write-lock-file 'github:logos-co/logos-delivery-module#liblogos_lez_rln_module-lgx' -o lez-rln-lgx
+          nix build --no-write-lock-file 'github:logos-co/logos-delivery-module#lez_core-lgx' -o lez-core-lgx
 
       # Order does not matter to lgpm — it installs into the modules dir, and
       # core resolves the dependency graph at load time.
