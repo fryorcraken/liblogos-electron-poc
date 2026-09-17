@@ -98,8 +98,17 @@ bundle: build-electron
 		node scripts/bundle-runtime.js $(CURDIR)/runtime-bundle
 
 # The deliverable: an x86_64 AppImage with the runtime inside it.
+#
+# --publish never: on a tag, electron-builder decides on its own that it should
+# publish to GitHub Releases, and fails the build for want of a token:
+#
+#   ⨯ GitHub Personal Access Token is not set, neither programmatically,
+#     nor using env "GH_TOKEN"
+#
+# Publishing is the release step's job (softprops/action-gh-release), not the
+# builder's. This target only ever builds.
 appimage: bundle
-	npx electron-builder --linux AppImage --x64
+	npx electron-builder --linux AppImage --x64 --publish never
 
 # Runs the PACKAGED AppImage, deliberately OUTSIDE the nix dev shell and with an
 # empty LD_LIBRARY_PATH. That is the whole point: if the bundle is truly
