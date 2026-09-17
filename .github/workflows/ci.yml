@@ -24,11 +24,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A standard runner has ~14 GB free, and this job wants most of it: the
+      # Nix store for liblogos + Waku + RLN, an Electron download, and a 300 MB+
+      # AppImage. Reclaiming the preinstalled toolchains nobody here uses buys
+      # ~20 GB and costs a few seconds.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
       - name: Install Nix
         uses: cachix/install-nix-action@v30
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+
+      # patchelf is what rewrites the bundle's rpaths (scripts/bundle-runtime.js),
+      # and `make bundle` reaches for it as `nix shell nixpkgs#patchelf`. Doing
+      # that lazily would resolve and download nixpkgs an hour into the job,
+      # right before the finish line. Fetched here instead, so a registry or
+      # network problem fails in the first minute.
+      - name: Prefetch patchelf
+        run: nix build --no-link nixpkgs#patchelf
 
       - uses: actions/setup-node@v4
         with:
