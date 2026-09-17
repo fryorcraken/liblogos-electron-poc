@@ -61,7 +61,7 @@ LGX_DIRS = cap-lgx delivery-lgx rln-lgx lez-rln-lgx lez-core-lgx
 # built in, so installing the package over it is unnecessary.
 DAEMON_LGX_DIRS = lez-core-lgx lez-rln-lgx rln-lgx delivery-lgx
 
-.PHONY: build build-electron smoke verify verify-node run bundle appimage modules probe-transport probe-sdk probe-core-service probe-node exp-provider exp-provider-electron exp-node exp-electron exp-call exp-call-electron exp-event clean
+.PHONY: build build-electron smoke verify verify-node run bundle appimage modules probe-transport probe-sdk probe-core-service probe-node probe-inproc exp-provider exp-provider-electron exp-node exp-electron exp-call exp-call-electron exp-event clean
 
 build:
 	$(SHELL_RUN) env LOGOS_LIBLOGOS_ROOT=$(LOGOS_LIBLOGOS_ROOT) npx node-gyp rebuild
@@ -164,6 +164,15 @@ probe-node:
 verify-node: build-electron
 	$(SHELL_RUN) env ELECTRON_DISABLE_SANDBOX=1 MODULE=$(MODULE) \
 		npx electron scripts/electron-node-smoke.js
+
+# 0.3.0, headless: the SHIPPED addon starting a real Waku node in-process, with
+# no daemon beside it. The counterpart of probe-node for the 0.2.0 route.
+#
+# Unlike the exp-* targets this drives src/addon.cc and src/index.js, so a pass
+# is a statement about the product rather than about a prototype beside it.
+probe-inproc: build
+	$(SHELL_RUN) env QT_QPA_PLATFORM=offscreen MODULE=$(MODULE) \
+		node scripts/probe-inproc.js
 
 # --- 0.3.0 research: can the addon HOST core_service in-process? -------------
 #

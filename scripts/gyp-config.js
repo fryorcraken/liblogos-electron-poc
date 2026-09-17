@@ -53,6 +53,29 @@ function logosRoot() {
   return real;
 }
 
+// nlohmann/json.hpp is NOT on the dev shell's default include path. It reaches
+// consumers as a propagatedBuildInput of the liblogos headers output (see
+// logos-liblogos/flake.nix:173, whose comment names the exact "fatal error:
+// nlohmann/json.hpp: No such file or directory" this avoids), and under
+// `nix develop` that propagation does not happen — so find it in the store.
+//
+// THE VERSION IS NOT FREE. liblogos_protocol.so's symbols are mangled with
+// json_abi_v3_11_3, so anything outside 3.11.x links against a differently-named
+// inline namespace and the call silently fails to resolve. Pinning the major.minor
+// here is what keeps that a build error rather than a runtime one.
+function nlohmannInclude() {
+  if (process.env.NLOHMANN_INCLUDE) return process.env.NLOHMANN_INCLUDE;
+  const candidates = fs
+    .readdirSync('/nix/store')
+    .filter((d) => /-nlohmann_json-3\.11\./.test(d))
+    .map((d) => path.join('/nix/store', d, 'include'))
+    .filter((p) => fs.existsSync(path.join(p, 'nlohmann', 'json.hpp')));
+  if (!candidates.length) {
+    fail('no nlohmann_json-3.11.x in /nix/store; set NLOHMANN_INCLUDE');
+  }
+  return candidates[0];
+}
+
 const what = process.argv[2];
 
 switch (what) {
@@ -60,6 +83,10 @@ switch (what) {
     // liblogos' own headers. Qt's come in via cflags_cc, since pkg-config
     // reports them as -I flags bundled with the defines Qt requires.
     console.log(path.join(logosRoot(), 'include'));
+    // nlohmann/json.hpp, for 0.3.0's call path: logos::nlohmannArgsToQVariantList
+    // and qvariantToNlohmann take it by reference, so the header is needed to
+    // compile a call to them. See nlohmannInclude() for the ABI trap.
+    console.log(nlohmannInclude());
     break;
   }
 
@@ -77,6 +104,17 @@ switch (what) {
     const out = [
       `-L${lib}`,
       '-llogos_core',
+      // 0.3.0: the in-process call and event path.
+      //   logos_qt_host   LogosAPI (construction, getClient)
+      //   logos_protocol  LogosAPIClient::invokeRemoteMethod /
+      //                   onEventWhenAvailable, and the json<->QVariant bridges
+      //
+      // This is the ABI commitment docs/0.3.0-inventory.md §5.9 flags: 0.1.0
+      // bound only the C ABI, which was deliberate insulation, and linking the
+      // C++ host runtime gives that up. Both .so files are already in
+      // bundle-runtime.js's output tree, so the AppImage does not grow.
+      '-llogos_qt_host',
+      '-llogos_protocol',
       // rpath, not LD_LIBRARY_PATH: the addon is dlopen'd by the electron
       // binary, and nothing in that launch path can set the environment for it.
       `-Wl,-rpath,${lib}`,
@@ -85,6 +123,12 @@ switch (what) {
     // Qt6Core: -L/-l from pkg-config, plus an rpath for its libdir so the
     // addon resolves Qt at runtime the same way it did at link time.
     out.push(...tokens(pkgConfig(['--libs', 'Qt6Core'])));
+    // Named explicitly rather than left to liblogos_protocol's own NEEDED:
+    // --as-needed drops a DT_NEEDED the link did not visibly use, and the QtRO
+    // round trip is reached through virtual dispatch, where the linker cannot
+    // see the use. Both are in the same dev shell as Qt6Core, so a missing one
+    // means the shell is wrong and stopping is the right answer.
+    out.push(...tokens(pkgConfig(['--libs', 'Qt6Network', 'Qt6RemoteObjects'])));
     const qtLibdir = pkgConfig(['--variable=libdir', 'Qt6Core']);
     if (qtLibdir) out.push(`-Wl,-rpath,${qtLibdir}`);
 
