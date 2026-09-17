@@ -70,6 +70,8 @@ smoke: build
 
 # Proves the binding survives inside Electron's main process, headlessly — the
 # Qt/Chromium coexistence question, answered without a human clicking anything.
+# The sandbox is disabled inside electron-smoke.js, not here, so it applies
+# however the script is invoked — see the comment there.
 verify: build-electron
 	$(SHELL_RUN) npx electron scripts/electron-smoke.js $(MODULE)
 

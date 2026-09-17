@@ -15,6 +15,13 @@ const moduleName = process.argv[2] || 'test_basic_module';
 
 app.disableHardwareAcceleration();
 
+// Chromium's SUID sandbox helper must be root-owned mode 4755, which it is not
+// in a node_modules checkout on a CI runner — it aborts with "The SUID sandbox
+// helper binary was found, but is not configured correctly" before anything
+// runs. Disabled here rather than on the command line so it applies however
+// this script is invoked. Headless check, local files only.
+app.commandLine.appendSwitch('no-sandbox');
+
 // Core reads this at startup and passes it to the module hosts.
 process.env.LOGOS_LOG_LEVEL = process.env.LOGOS_LOG_LEVEL || 'debug';
 
