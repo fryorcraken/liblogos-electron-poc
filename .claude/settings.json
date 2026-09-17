@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make build)",
+      "Bash(make build-electron)",
+      "Bash(make smoke)",
+      "Bash(make smoke *)",
+      "Bash(make verify)",
+      "Bash(make verify *)",
+      "Bash(make run)",
+      "Bash(make clean)",
+      "Bash(make bundle)",
+      "Bash(make appimage)",
+      "Bash(nix build *)",
+      "Bash(nix eval *)",
+      "Bash(nix flake show *)",
+      "Bash(nix develop *)",
+      "Bash(pkg-config *)",
+      "Bash(objdump *)",
+      "Bash(readelf *)",
+      "Bash(ldd *)",
+      "Bash(patchelf *)",
+      "Bash(pgrep *)",
+      "Bash(./lgpm/bin/lgpm *)"
+    ]
+  }
+}

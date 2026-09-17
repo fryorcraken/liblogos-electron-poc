@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>liblogos · Electron PoC</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 32px;
+        font: 14px/1.6 system-ui, sans-serif;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        min-height: 100vh;
+        box-sizing: border-box;
+      }
+      h1 { font-size: 17px; margin: 0; }
+      .sub { color: GrayText; margin: 4px 0 0; }
+      #status {
+        font-size: 15px;
+        font-weight: 600;
+        padding: 14px 16px;
+        border-radius: 8px;
+        border: 1px solid ButtonBorder;
+      }
+      #status[data-state='idle']    { color: GrayText; }
+      #status[data-state='working'] { color: #b7791f; }
+      #status[data-state='ok']      { color: #217a3c; }
+      #status[data-state='error']   { color: #c0392b; }
+      button { padding: 9px 18px; font: inherit; font-weight: 600; align-self: flex-start; }
+      button:disabled { opacity: 0.5; }
+      pre {
+        flex: 1;
+        background: color-mix(in srgb, Canvas 92%, CanvasText);
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin: 0;
+        overflow: auto;
+        white-space: pre-wrap;
+        font-size: 12px;
+        min-height: 180px;
+      }
+      .err { color: #c0392b; }
+    </style>
+  </head>
+  <body>
+    <div>
+      <h1>liblogos · Electron PoC</h1>
+      <p class="sub">
+        Starts the Logos <code>delivery</code> module through
+        <code>liblogos_core</code>'s C ABI, from a native addon in Electron's
+        main process.
+      </p>
+    </div>
+
+    <div id="status" data-state="idle">Ready.</div>
+
+    <button id="start">Start delivery module</button>
+
+    <pre id="log"></pre>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

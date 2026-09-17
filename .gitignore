@@ -1,0 +1,16 @@
+node_modules/
+build/
+dist/
+runtime-bundle/
+
+# nix build result symlinks
+/liblogos
+/lgpm
+/cap-lgx
+/delivery-lgx
+/rln-lgx
+/lez-rln-lgx
+/lez-core-lgx
+
+# lgpm-installed modules
+/modules

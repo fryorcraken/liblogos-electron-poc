@@ -1,0 +1,182 @@
+# liblogos-electron-poc
+
+A **proof of concept**: an x86_64 **AppImage** containing an
+[Electron](https://electronjs.org) app that starts the
+[Logos](https://github.com/logos-co/logos-liblogos) `delivery` module through
+`liblogos_core`'s C ABI.
+
+Companion to [`liblogos-rust-poc`](../liblogos-rust-poc), which embeds the same
+runtime in a Rust CLI. Same question — *can a standalone app in a language other
+than C++ embed the Logos runtime?* — with two harder follow-ups: the host is
+**Electron**, so Qt has to coexist with Chromium in one process; and the result
+has to **ship as a single file** that runs on a machine with no Nix.
+
+## Result
+
+**Both work.**
+
+```
+$ make verify-appimage        # the packaged AppImage, outside any dev shell
+
+logos_host:  /tmp/appimage_extracted_.../resources/runtime/bin/logos_host
+[logos] Module loaded: capability_module
+known: liblogos_lez_rln_module, liblogos_rln_module, lez_core, delivery_module, capability_module
+[logos] Module loaded: lez_core
+[logos] Module loaded: liblogos_lez_rln_module
+[logos] Module loaded: liblogos_rln_module
+[logos] [delivery_module] DeliveryModuleImpl: Initializing...
+[logos] Module loaded: delivery_module
+loadModule(delivery_module) -> true in 59 ms
+
+PASS: delivery_module started from the packaged app
+```
+
+That runs the built AppImage with `LD_LIBRARY_PATH` unset and no `nix develop`
+anywhere — the app resolves Qt, `liblogos_core`, `logos_host` and all five
+modules entirely through its own bundled, `$ORIGIN`-relative libraries.
+
+- **Qt and Chromium coexist in-process.** No symbol collision, no event-loop
+  deadlock, no helper process needed.
+- **The AppImage is self-contained**, 314 MB, and starts the real delivery
+  module with its Waku/RLN dependency chain.
+
+## What it does
+
+1. `src/addon.cc` wraps the C ABI (`logos_core.h`) as an N-API addon, and
+   constructs the `QCoreApplication` liblogos requires. No Rust, no FFI shim —
+   the binding is C++, so it creates the Qt application object directly.
+2. `src/main.js` (Electron main) owns the runtime and exposes one action to the
+   renderer over IPC. The renderer never sees native code: `contextIsolation`
+   on, `nodeIntegration` off.
+3. `scripts/bundle-runtime.js` collects the runtime into a relocatable tree, and
+   electron-builder packs that into the AppImage.
+
+The UI is one button. This is a packaging and embedding PoC, not a module
+browser.
+
+## Layout
+
+```
+src/addon.cc               N-API bindings + QCoreApplication
+src/index.js               addon loading (incl. the asar.unpacked path fix)
+src/main.js                Electron main: owns the runtime, IPC, headless self-test
+src/preload.js             contextBridge surface
+src/renderer/              the one-button UI
+scripts/gyp-config.js      resolves liblogos + Qt build flags for binding.gyp
+scripts/bundle-runtime.js  the relocatable runtime bundle (rpath rewriting)
+scripts/smoke.js           drives the addon under plain Node
+scripts/electron-smoke.js  drives it inside Electron, headless
+electron-builder.yml       AppImage packaging
+```
+
+## Build
+
+Prerequisites: [Nix](https://nixos.org) with flakes, Node 20+.
+
+```bash
+# 1. liblogos itself.
+nix build 'github:logos-co/logos-liblogos' -o ./liblogos
+
+# 2. The package manager and every module in delivery's dependency chain.
+nix build 'github:logos-co/logos-package-manager#cli' -o lgpm
+nix build 'github:logos-co/logos-capability-module#lgx' -o cap-lgx
+nix build 'github:logos-co/logos-delivery-module#lgx' -o delivery-lgx
+nix build 'github:logos-co/logos-delivery-module#liblogos_rln_module-lgx' -o rln-lgx
+nix build 'github:logos-co/logos-delivery-module#liblogos_lez_rln_module-lgx' -o lez-rln-lgx
+nix build 'github:logos-co/logos-delivery-module#lez_core-lgx' -o lez-core-lgx
+
+# 3. Install them, then build.
+npm ci --ignore-scripts
+make modules           # lgpm install every .lgx into ./modules
+make appimage          # -> dist/liblogos-electron-poc-0.1.0-x86_64.AppImage
+make verify-appimage   # prove the packaged app starts delivery
+```
+
+Other targets: `make smoke` (plain Node), `make verify` (headless Electron),
+`make run` (the app). All of them run inside liblogos' dev shell — see below for
+why that is not optional. If your liblogos checkout is elsewhere:
+
+```bash
+make appimage LIBLOGOS_FLAKE=/path/to/logos-liblogos
+```
+
+## Findings
+
+### The Qt version trap
+
+**Everything must be built and run against the Qt that liblogos was built
+against.** Linking the addon against a distro Qt (6.10.3 in `/usr/lib64` here)
+while liblogos uses the Qt its flake pins (6.9.2) compiles and links fine, then
+fails at `dlopen`:
+
+```
+libQt6Core.so.6: version `Qt_6_PRIVATE_API' not found
+  (required by .../libQt6RemoteObjects.so.6)
+```
+
+liblogos' Qt dependencies reach for private symbols only their matching Qt
+exports. Hence every `make` target wraps its command in `nix develop`.
+
+### Nix rpaths do not survive packaging
+
+Everything Nix builds names its dependencies by absolute `/nix/store` path,
+recorded in each ELF file's `RUNPATH`. Copying those files into an AppImage
+produces a bundle that cannot resolve a single library. `bundle-runtime.js`
+therefore walks the transitive `NEEDED` closure (61 libraries), copies each one
+into a flat `lib/`, and rewrites every `RUNPATH` to be `$ORIGIN`-relative,
+including the module plugins' own versioned siblings (`libpq.so.5.17` and
+friends, which are easy to miss — they are not entry points).
+
+### libstdc++ must be bundled; glibc must not
+
+The usual AppImage advice is to bundle neither. But `logos_host` is a **separate
+process** spawned by core, inheriting none of the app's library paths, and Nix
+builds it against a much newer GCC than a distro ships. Without a bundled
+`libstdc++.so.6` every module load fails:
+
+```
+logos_host: error while loading shared libraries: libstdc++.so.6:
+  cannot open shared object file
+[logos] Failed to load module capability_module: the module process exited with code 127
+```
+
+`libstdc++` and `libgcc_s` are backward-compatible, so bundling them is safe.
+glibc is not, and must still come from the host — its loader is the host's.
+
+### The addon cannot live inside app.asar
+
+`dlopen` cannot read from an asar archive, so the addon is `asarUnpack`ed and
+`src/index.js` rewrites `app.asar/` to `app.asar.unpacked/` in the path. Its
+rpath also has to point at `resources/runtime/lib` — three levels up from where
+electron-builder puts it — which `bundle-runtime.js` patches in place.
+
+### electron-builder must not rebuild the addon
+
+`npmRebuild: false`. Its `@electron/rebuild` step runs node-gyp outside the dev
+shell, where `LOGOS_LIBLOGOS_ROOT` is unset and the wrong Qt is on the
+pkg-config path — so it either fails outright or silently produces a binary
+linked against the system Qt.
+
+### loadModule blocks the main process
+
+`logos_core_load_module` blocks until the module's host reports the plugin
+loaded, and `logos_core.h` is explicit that core's outbound calls run on the
+thread that called `logos_core_start()`. Every binding here is therefore
+synchronous and main-thread-only, so **a module bring-up freezes the UI** — 59 ms
+for delivery's whole chain, but a heavier module would be visible.
+
+A real app would put the runtime on its own thread owning a Qt event loop, or in
+a helper process. Neither is needed to demonstrate that the API works.
+
+### Two ABIs, two builds
+
+Electron embeds its own Node/V8 ABI, so an addon built for the system Node will
+not load in Electron. Hence `make build` (plain Node, for `make smoke`) and
+`make build-electron` (everything else), writing to the same path; the targets
+depend on the right one so they cannot drift.
+
+## CI
+
+`.github/workflows/ci.yml` builds liblogos and every module through Nix, runs
+the headless verification, builds the AppImage, and uploads it as an artifact.
+Pushing a `v*` tag additionally publishes it as a release asset.

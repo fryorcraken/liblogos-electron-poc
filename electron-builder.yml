@@ -1,0 +1,58 @@
+# electron-builder config: produces an x86_64 AppImage.
+#
+# The Electron side of packaging is ordinary. The interesting part is the Logos
+# runtime, which is NOT an npm dependency — it is a tree of Nix-built shared
+# libraries plus the module plugins, assembled by scripts/bundle-runtime.js and
+# dropped in here wholesale via extraResources.
+appId: co.logos.liblogos-electron-poc
+productName: liblogos-electron-poc
+copyright: MIT OR Apache-2.0
+
+directories:
+  output: dist
+  buildResources: build-resources
+
+# The app itself: source and the native addon. node_modules is pulled in by
+# electron-builder from package.json's dependencies.
+files:
+  - src/**/*
+  - package.json
+  # The addon is loaded by dlopen, which cannot read from inside an asar
+  # archive — hence asarUnpack below.
+  - build/Release/logos_addon.node
+
+asar: true
+asarUnpack:
+  - build/Release/logos_addon.node
+
+# DO NOT let electron-builder rebuild the addon. Its @electron/rebuild step runs
+# node-gyp outside the liblogos dev shell, where LOGOS_LIBLOGOS_ROOT is unset and
+# the wrong Qt is on the pkg-config path — so it either fails outright or, worse,
+# silently produces a binary linked against the system Qt. `make build-electron`
+# has already built the addon correctly against Electron's ABI; package it as is.
+npmRebuild: false
+
+# The bundled Logos runtime: Qt, liblogos_core and its closure, logos_host, and
+# the installed modules with their plugins. Lands at
+# <AppImage>/resources/runtime/, which is what runtimePaths() in src/main.js
+# looks for when app.isPackaged is true.
+extraResources:
+  - from: runtime-bundle
+    to: runtime
+    filter:
+      - "**/*"
+
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  category: Network
+  # Electron's own sandbox needs either a setuid helper or user namespaces;
+  # inside an AppImage neither is guaranteed, and a PoC should start rather
+  # than argue about it. The app loads only local files.
+  executableArgs:
+    - --no-sandbox
+
+appImage:
+  artifactName: ${productName}-${version}-x86_64.AppImage

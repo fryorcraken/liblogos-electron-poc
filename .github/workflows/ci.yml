@@ -1,0 +1,91 @@
+# Builds the x86_64 AppImage, and attaches it to a release when a tag is pushed.
+#
+# Everything runs through Nix, for the same reason the Makefile does: liblogos
+# and every module are Nix-built, and the addon must be compiled against the
+# exact Qt that liblogos was built against. A GitHub runner's system Qt would
+# reproduce the `Qt_6_PRIVATE_API not found` failure documented in the README.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed by the release job to upload the AppImage asset
+
+jobs:
+  appimage:
+    name: Build AppImage (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # Build liblogos and every module package. These are the slow steps —
+      # delivery pulls in Waku and RLN, which compile from source.
+      - name: Build liblogos
+        run: nix build 'github:logos-co/logos-liblogos' -o ./liblogos
+
+      - name: Build package manager and modules
+        run: |
+          nix build 'github:logos-co/logos-package-manager#cli' -o lgpm
+          nix build 'github:logos-co/logos-capability-module#lgx' -o cap-lgx
+          nix build 'github:logos-co/logos-delivery-module#lgx' -o delivery-lgx
+          nix build 'github:logos-co/logos-delivery-module#liblogos_rln_module-lgx' -o rln-lgx
+          nix build 'github:logos-co/logos-delivery-module#liblogos_lez_rln_module-lgx' -o lez-rln-lgx
+          nix build 'github:logos-co/logos-delivery-module#lez_core-lgx' -o lez-core-lgx
+
+      # Order does not matter to lgpm — it installs into the modules dir, and
+      # core resolves the dependency graph at load time.
+      - name: Install modules
+        run: make modules
+
+      # --ignore-scripts: the postinstall would run node-gyp outside the dev
+      # shell, where LOGOS_LIBLOGOS_ROOT is unset. The Makefile builds the addon
+      # properly in the steps below.
+      - name: Install JS dependencies
+        run: npm ci --ignore-scripts
+
+      # Proves the module actually loads before anything is packaged, so a
+      # broken AppImage is never published. Electron needs an X display even
+      # with no window on screen, hence xvfb-run on a headless runner.
+      - name: Verify delivery module loads
+        run: xvfb-run --auto-servernum make verify LIBLOGOS_FLAKE=github:logos-co/logos-liblogos
+
+      - name: Build AppImage
+        run: make appimage LIBLOGOS_FLAKE=github:logos-co/logos-liblogos
+
+      # The real test: run the PACKAGED app with no dev shell and no
+      # LD_LIBRARY_PATH, so it must resolve everything through its own bundled
+      # rpaths. A bundle that still refers to /nix/store fails here rather than
+      # on a user's machine.
+      - name: Verify the AppImage starts delivery_module
+        run: xvfb-run --auto-servernum make verify-appimage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: liblogos-electron-poc-x86_64.AppImage
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+      # On a tag, publish the AppImage as a release asset.
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.AppImage
+          generate_release_notes: true
