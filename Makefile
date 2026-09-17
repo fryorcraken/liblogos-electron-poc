@@ -103,8 +103,13 @@ appimage: bundle
 # $ORIGIN rpaths alone. Any leftover /nix/store reference fails here.
 APPIMAGE = dist/liblogos-electron-poc-$(shell node -p "require('./package.json').version")-x86_64.AppImage
 
+# ELECTRON_DISABLE_SANDBOX for the same reason as `verify`: the --no-sandbox
+# flag is read too late to stop Chromium's SUID helper from aborting on a runner
+# where the helper is not root-owned 4755 and user namespaces are off. Both are
+# passed — the flag is harmless, and the variable is what actually works.
 verify-appimage:
 	env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH LOGOS_SMOKE=1 \
+		ELECTRON_DISABLE_SANDBOX=1 \
 		$(APPIMAGE) --appimage-extract-and-run --no-sandbox
 
 # Install every .lgx into ./modules. Safe to re-run; lgpm overwrites in place.
