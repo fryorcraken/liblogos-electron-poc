@@ -154,7 +154,7 @@ async function runSmokeTest() {
     console.log(`loaded: ${core.loadedModules().join(', ')}`);
     core.cleanup();
 
-    console.log(ok ? `\nPASS: ${MODULE_NAME} started from the packaged app` : '\nFAIL');
+    console.log(ok ? `\nPASS: ${MODULE_NAME} loaded from the packaged app` : '\nFAIL');
     app.exit(ok ? 0 : 1);
   } catch (err) {
     console.error(`FAIL: ${err.message}`);

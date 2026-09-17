@@ -34,8 +34,12 @@ els.start.addEventListener('click', async () => {
     for (const line of result.log) log(line);
 
     if (result.ok) {
-      setStatus(`delivery module running (${result.elapsedMs} ms)`, 'ok');
+      // "loaded", not "running": core reports that the module's plugin loaded
+      // in its host process. Nothing here calls the module's own API, so no
+      // Waku node is started and no peers are connected. See the README.
+      setStatus(`delivery module loaded (${result.elapsedMs} ms)`, 'ok');
       log(`Loaded modules: ${result.loaded.join(', ')}`);
+      log('Note: loaded means the plugin is up in its host process — no peers or traffic.');
     } else {
       setStatus('delivery failed to load', 'error');
       log('core refused the load — see the terminal for its log', true);

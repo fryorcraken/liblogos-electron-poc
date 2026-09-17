@@ -1,9 +1,13 @@
 # liblogos-electron-poc
 
 A **proof of concept**: an x86_64 **AppImage** containing an
-[Electron](https://electronjs.org) app that starts the
+[Electron](https://electronjs.org) app that brings up the
 [Logos](https://github.com/logos-co/logos-liblogos) `delivery` module through
 `liblogos_core`'s C ABI.
+
+This is a **packaging and embedding** PoC. It proves the module and its whole
+dependency chain load inside a shipped app; it does not drive the module's own
+API — see [What "loaded" does and does not mean](#what-loaded-does-and-does-not-mean).
 
 Companion to [`liblogos-rust-poc`](../liblogos-rust-poc), which embeds the same
 runtime in a Rust CLI. Same question — *can a standalone app in a language other
@@ -28,7 +32,7 @@ known: liblogos_lez_rln_module, liblogos_rln_module, lez_core, delivery_module, 
 [logos] Module loaded: delivery_module
 loadModule(delivery_module) -> true in 59 ms
 
-PASS: delivery_module started from the packaged app
+PASS: delivery_module loaded from the packaged app
 ```
 
 That runs the built AppImage with `LD_LIBRARY_PATH` unset and no `nix develop`
@@ -37,8 +41,41 @@ modules entirely through its own bundled, `$ORIGIN`-relative libraries.
 
 - **Qt and Chromium coexist in-process.** No symbol collision, no event-loop
   deadlock, no helper process needed.
-- **The AppImage is self-contained**, 314 MB, and starts the real delivery
+- **The AppImage is self-contained**, 314 MB, and brings up the real delivery
   module with its Waku/RLN dependency chain.
+
+### What "loaded" does and does not mean
+
+`logos_core.h` defines a loaded module as one whose **plugin has loaded in its
+host process** — not one that is doing any work. That is exactly what this PoC
+shows, and it is worth being precise about the gap:
+
+| Demonstrated | Not demonstrated |
+| --- | --- |
+| The plugin loads; `DeliveryModuleImpl` constructs | No Waku node is started |
+| The dependency graph resolves and loads in order | No peers, no connections, no messages |
+| The C ABI is fully reachable from Electron | No module method is ever called |
+
+Calling into a module is a different API: `LogosAPIClient`, the Qt-based remote
+invocation layer, which this addon does not wrap — it binds only the lifecycle
+functions in `logos_core.h`. The module exposes `connectionStatus`,
+`connectionStateChanged(QString,int)` and `stop()`, none of which are driven
+here.
+
+One consequence is already visible in the log:
+
+```
+[liblogos_rln_module] membership module: host provided no
+  instance_persistence_path — keystore ops will fail
+```
+
+That is `logos_core_set_persistence_base_path()`, which this PoC never calls, so
+RLN keystore operations would fail if anything asked for them.
+
+Making the module actually deliver messages means wrapping `LogosAPIClient` and
+setting a persistence path — a larger piece of work, and the obvious next step.
+The packaging question this PoC set out to answer is settled independently of
+it.
 
 ## What it does
 

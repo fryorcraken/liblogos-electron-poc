@@ -48,9 +48,10 @@
     <div>
       <h1>liblogos · Electron PoC</h1>
       <p class="sub">
-        Starts the Logos <code>delivery</code> module through
-        <code>liblogos_core</code>'s C ABI, from a native addon in Electron's
-        main process.
+        Loads the Logos <code>delivery</code> module and its dependency chain
+        through <code>liblogos_core</code>'s C ABI, from a native addon in
+        Electron's main process. Packaging PoC: the module's own API is not
+        driven, so no peers are connected.
       </p>
     </div>
 
