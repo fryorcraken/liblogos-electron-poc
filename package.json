@@ -11,6 +11,7 @@
     "smoke": "node scripts/smoke.js"
   },
   "dependencies": {
+    "logos-js-sdk": "github:logos-co/logos-js-sdk",
     "node-addon-api": "^8.3.0"
   },
   "devDependencies": {

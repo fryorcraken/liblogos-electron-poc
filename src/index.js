@@ -45,6 +45,20 @@ module.exports = {
   init: addon.init,
   addModulesDir: addon.addModulesDir,
   setPersistenceBasePath: addon.setPersistenceBasePath,
+
+  /**
+   * Give a module its own transport set, so a consumer outside this process can
+   * reach it. `transportSetJson` is a JSON array of LogosTransportConfig; see
+   * logos_transport_config.h. Must be called before the module loads.
+   */
+  setModuleTransports: addon.setModuleTransports,
+
+  /**
+   * A capability token from core's token manager, or null if the key is
+   * unknown. An out-of-process consumer needs one to call a module over a plain
+   * transport, where the capability handshake is not available.
+   */
+  getToken: addon.getToken,
   start: addon.start,
   cleanup: addon.cleanup,
 

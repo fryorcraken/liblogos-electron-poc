@@ -57,7 +57,7 @@ ELECTRON_GYP = npx node-gyp rebuild --target=$(ELECTRON_VERSION) \
 # plus capability_module, which core brings up on its own at start().
 LGX_DIRS = cap-lgx delivery-lgx rln-lgx lez-rln-lgx lez-core-lgx
 
-.PHONY: build build-electron smoke verify run bundle appimage modules clean
+.PHONY: build build-electron smoke verify run bundle appimage modules probe-transport probe-sdk clean
 
 build:
 	$(SHELL_RUN) env LOGOS_LIBLOGOS_ROOT=$(LOGOS_LIBLOGOS_ROOT) npx node-gyp rebuild
@@ -104,6 +104,15 @@ modules:
 	mkdir -p modules
 	for d in $(LGX_DIRS); do ./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file $$d/*.lgx; done
 	ls modules/
+
+# Finds the transport JSON core accepts, by trying one and checking whether the
+# module actually binds the port. See scripts/probe-transport.js.
+probe-transport: build
+	$(SHELL_RUN) env QT_QPA_PLATFORM=offscreen node scripts/probe-transport.js
+
+# The next question: can logos-js-sdk actually call the module over that port?
+probe-sdk: build
+	$(SHELL_RUN) env QT_QPA_PLATFORM=offscreen node scripts/probe-sdk.js
 
 clean:
 	rm -rf build dist runtime-bundle

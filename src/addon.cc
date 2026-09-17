@@ -134,6 +134,22 @@ Napi::Value SetPersistenceBasePath(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
+// Give a module a transport set of its own, so something outside this process
+// can reach it. Modules otherwise inherit the global default (LocalSocket, i.e.
+// QLocalSocket via QRemoteObjects), which only a Qt consumer can speak —
+// logos-js-sdk talks plain TCP.
+//
+// `transport_set_json` is a JSON array of LogosTransportConfig; see
+// logos_transport_config.h. Must be called BEFORE the module is loaded.
+Napi::Value SetModuleTransports(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  RequireState(env, g_initialized, "call init() before setModuleTransports()");
+  const std::string name = RequireStringArg(info, 0, "moduleName");
+  const std::string json = RequireStringArg(info, 1, "transportSetJson");
+  logos_core_set_module_transports(name.c_str(), json.c_str());
+  return env.Undefined();
+}
+
 Napi::Value Start(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   RequireState(env, g_initialized, "call init() before start()");
@@ -211,6 +227,23 @@ Napi::Value ModulesInfoJson(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   RequireState(env, g_initialized, "call init() before modulesInfoJson()");
   return TakeString(env, logos_core_get_modules_info());
+}
+
+// Fetch a capability token from core's token manager.
+//
+// Needed because an out-of-process consumer over a PLAIN transport cannot run
+// the capability handshake: the module logs "PlainTransportHost::publishObject:
+// expected ModuleProxy for <module>__handshake (plain transport only publishes
+// ModuleProxy for now)", and every invocation then hangs waiting for a token
+// that never arrives. Handing the token to the SDK's saveToken() lets it skip
+// the handshake entirely.
+//
+// Returns null when the key is unknown.
+Napi::Value GetToken(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  RequireState(env, g_initialized, "call init() before getToken()");
+  const std::string key = RequireStringArg(info, 0, "key");
+  return TakeString(env, logos_core_get_token(key.c_str()));
 }
 
 Napi::Value RefreshModules(const Napi::CallbackInfo& info) {
@@ -300,6 +333,7 @@ Napi::Object InitAddon(Napi::Env env, Napi::Object exports) {
   exports.Set("init", Napi::Function::New(env, Init));
   exports.Set("addModulesDir", Napi::Function::New(env, AddModulesDir));
   exports.Set("setPersistenceBasePath", Napi::Function::New(env, SetPersistenceBasePath));
+  exports.Set("setModuleTransports", Napi::Function::New(env, SetModuleTransports));
   exports.Set("start", Napi::Function::New(env, Start));
   exports.Set("cleanup", Napi::Function::New(env, Cleanup));
 
@@ -309,6 +343,7 @@ Napi::Object InitAddon(Napi::Env env, Napi::Object exports) {
   exports.Set("loadedModules", Napi::Function::New(env, LoadedModules));
   exports.Set("modulesInfoJson", Napi::Function::New(env, ModulesInfoJson));
   exports.Set("refreshModules", Napi::Function::New(env, RefreshModules));
+  exports.Set("getToken", Napi::Function::New(env, GetToken));
   exports.Set("startLogCapture", Napi::Function::New(env, StartLogCapture));
 
   // Mirrors LogosLoadDeps. The header pins these numbers and forbids
