@@ -11,13 +11,13 @@
     "smoke": "node scripts/smoke.js"
   },
   "dependencies": {
-    "node-addon-api": "^8.3.0"
+    "node-addon-api": "^8.3.0",
+    "logos-js-sdk": "github:logos-co/logos-js-sdk"
   },
   "devDependencies": {
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
-    "node-gyp": "^11.0.0",
-    "logos-js-sdk": "github:logos-co/logos-js-sdk"
+    "node-gyp": "^11.0.0"
   },
   "license": "MIT OR Apache-2.0"
 }

@@ -61,7 +61,7 @@ LGX_DIRS = cap-lgx delivery-lgx rln-lgx lez-rln-lgx lez-core-lgx
 # built in, so installing the package over it is unnecessary.
 DAEMON_LGX_DIRS = lez-core-lgx lez-rln-lgx rln-lgx delivery-lgx
 
-.PHONY: build build-electron smoke verify run bundle appimage modules probe-transport probe-sdk probe-core-service clean
+.PHONY: build build-electron smoke verify run bundle appimage modules probe-transport probe-sdk probe-core-service probe-node clean
 
 build:
 	$(SHELL_RUN) env LOGOS_LIBLOGOS_ROOT=$(LOGOS_LIBLOGOS_ROOT) npx node-gyp rebuild
@@ -150,5 +150,59 @@ probe-core-service:
 		DAEMON_LGX_DIRS="$(DAEMON_LGX_DIRS)" LIBLOGOS_FLAKE=$(LIBLOGOS_FLAKE) \
 		bash scripts/probe-core-service.sh
 
+# 0.2.0, headless: the app's OWN daemon and gateway modules (src/daemon.js,
+# src/gateway.js) starting a real node and streaming its events. Same code the
+# button drives, without Electron — so a failure here is a failure in the app,
+# not in a script that merely resembles it.
+probe-node:
+	$(SHELL_RUN) env MODULE=$(MODULE) node scripts/probe-node.js
+
+# --- 0.3.0 research: can the addon HOST core_service in-process? -------------
+#
+# EXPERIMENTAL, and deliberately kept out of `build`: these targets compile a
+# SECOND addon (scripts/exp-provider/) that links liblogos_qt_host and
+# liblogos_protocol on top of what the shipped addon uses. Nothing here touches
+# src/addon.cc or binding.gyp, so a broken experiment cannot break the release.
+#
+# The question: publishing a provider object and serving RPC needs a LIVE Qt
+# event loop, and src/addon.cc has never run one. See docs/0.3.0-inventory.md.
+EXP_DIR = scripts/exp-provider
+
+exp-provider:
+	$(SHELL_RUN) env LOGOS_LIBLOGOS_ROOT=$(LOGOS_LIBLOGOS_ROOT) \
+		npx node-gyp rebuild --directory=$(EXP_DIR)
+
+exp-provider-electron:
+	$(SHELL_RUN) env LOGOS_LIBLOGOS_ROOT=$(LOGOS_LIBLOGOS_ROOT) \
+		npx node-gyp rebuild --directory=$(EXP_DIR) \
+		--target=$(ELECTRON_VERSION) --dist-url=https://electronjs.org/headers
+
+# Under plain Node first: if a published provider cannot answer HERE, Electron
+# is not the variable. EXP_MODE selects how the Qt event loop is driven:
+# none | pump | thread.
+EXP_MODE ?= pump
+EXP_PORT ?= 7401
+
+exp-node: exp-provider
+	$(SHELL_RUN) env QT_QPA_PLATFORM=offscreen EXP_MODE=$(EXP_MODE) \
+		EXP_PORT=$(EXP_PORT) node $(EXP_DIR)/exp-host.js
+
+# The one that decides 0.3.0: the same provider, inside Electron's main
+# process, alongside a live Chromium. ELECTRON_DISABLE_SANDBOX for the same
+# reason as `verify`.
+exp-electron: exp-provider-electron
+	$(SHELL_RUN) env ELECTRON_DISABLE_SANDBOX=1 EXP_MODE=$(EXP_MODE) \
+		EXP_PORT=$(EXP_PORT) npx electron $(EXP_DIR)/exp-electron.js
+
+# EXPERIMENT 2: the in-process CALL path. If this works, 0.3.0 does not need a
+# published core_service at all — the gateway exists for OUT-of-process clients.
+exp-call: exp-provider
+	$(SHELL_RUN) env QT_QPA_PLATFORM=offscreen MODULE=$(MODULE) \
+		node $(EXP_DIR)/exp-call-host.js
+
+exp-call-electron: exp-provider-electron
+	$(SHELL_RUN) env ELECTRON_DISABLE_SANDBOX=1 MODULE=$(MODULE) \
+		npx electron $(EXP_DIR)/exp-call-electron.js
+
 clean:
-	rm -rf build dist runtime-bundle
+	rm -rf build dist runtime-bundle $(EXP_DIR)/build
