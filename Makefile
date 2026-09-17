@@ -57,6 +57,10 @@ ELECTRON_GYP = npx node-gyp rebuild --target=$(ELECTRON_VERSION) \
 # plus capability_module, which core brings up on its own at start().
 LGX_DIRS = cap-lgx delivery-lgx rln-lgx lez-rln-lgx lez-core-lgx
 
+# The same list minus cap-lgx, for the logosctl daemon: it has capability_module
+# built in, so installing the package over it is unnecessary.
+DAEMON_LGX_DIRS = lez-core-lgx lez-rln-lgx rln-lgx delivery-lgx
+
 .PHONY: build build-electron smoke verify run bundle appimage modules probe-transport probe-sdk probe-core-service clean
 
 build:
@@ -133,12 +137,9 @@ probe-sdk: build
 LOGOSCTL = ./logosctl/bin/logosctl
 
 probe-core-service:
-	$(LOGOSCTL) daemon config set scripts/daemon-node.yaml
-	$(LOGOSCTL) daemon start
-	$(LOGOSCTL) package install --dir $(CURDIR)/modules -y || true
-	$(LOGOSCTL) module load $(MODULE) || true
-	$(SHELL_RUN) node scripts/probe-core-service.js; \
-		status=$$?; $(LOGOSCTL) daemon stop || true; exit $$status
+	env LOGOSCTL=$(LOGOSCTL) MODULE=$(MODULE) \
+		DAEMON_LGX_DIRS="$(DAEMON_LGX_DIRS)" LIBLOGOS_FLAKE=$(LIBLOGOS_FLAKE) \
+		bash scripts/probe-core-service.sh
 
 clean:
 	rm -rf build dist runtime-bundle

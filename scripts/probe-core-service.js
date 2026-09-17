@@ -33,6 +33,18 @@ if (!process.env.LOGOS_PROTOCOL_LIB) {
   );
 }
 
+// The daemon writes its own client's token here each boot.
+function readSessionToken() {
+  const os = require('node:os');
+  const fs = require('node:fs');
+  const file = path.join(os.homedir(), '.logosctl', 'client', 'auto.json');
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8')).token || null;
+  } catch {
+    return null;
+  }
+}
+
 async function main() {
   const { LogosClient, tcp } = require('logos-js-sdk');
 
@@ -46,7 +58,12 @@ async function main() {
 
   // The token the daemon issued, from its session dir. logosctl's own client
   // saves it for both "cli_client" and "core_service" (client.cpp).
-  const token = process.env.PROBE_TOKEN;
+  //
+  // READ IT NOW, not from a variable set earlier: auto.json is rewritten on
+  // every daemon boot, and a stale token does not fail loudly — the call simply
+  // never answers, which looks exactly like the plain-transport hang and cost
+  // an afternoon of misdiagnosis.
+  const token = process.env.PROBE_TOKEN || readSessionToken();
   if (token) {
     console.log(`saveToken(core_service, <token>) -> ${logos.saveToken('core_service', token)}`);
   } else {
