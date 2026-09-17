@@ -60,6 +60,16 @@ void RequireState(const Napi::Env& env, bool condition, const char* message) {
   }
 }
 
+// delete[], NOT free(). logos_core_* allocates every string it hands back with
+// new[], never malloc: module_manager.cpp's toNullTerminatedArray does
+// `new char*[]` plus a `new char[]` per element, and getModulesInfoCStr /
+// getModuleStats each `new char[]`. Mixing allocators is undefined behaviour —
+// it happened not to crash here, which is the worst way for it to behave.
+//
+// Both other hosts that drain this C API carry the same note and the same fix:
+// logos-logoscore-cli's core_service_impl.cpp:28 and logos-basecamp's
+// CoreModuleManager.cpp.
+
 // Consume a null-terminated char** from core into a JS array, freeing as it goes.
 Napi::Array TakeStringArray(const Napi::Env& env, char** owned) {
   Napi::Array out = Napi::Array::New(env);
@@ -69,9 +79,9 @@ Napi::Array TakeStringArray(const Napi::Env& env, char** owned) {
   uint32_t i = 0;
   for (char** cursor = owned; *cursor != nullptr; ++cursor, ++i) {
     out.Set(i, Napi::String::New(env, *cursor));
-    std::free(*cursor);
+    delete[] *cursor;
   }
-  std::free(owned);
+  delete[] owned;
   return out;
 }
 
@@ -83,7 +93,7 @@ Napi::Value TakeString(const Napi::Env& env, char* owned) {
     return env.Null();
   }
   Napi::Value out = Napi::String::New(env, owned);
-  std::free(owned);
+  delete[] owned;
   return out;
 }
 
