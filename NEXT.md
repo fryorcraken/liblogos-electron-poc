@@ -250,6 +250,60 @@ below, and delete the daemon. Same UI, same SDK surface, one process.
    the SDK route work as originally hoped, and `make probe-sdk` is the check for
    whether it has happened.
 
+## What a Development Kit would have to expose
+
+Framed as the question "what, exactly, would a Logos dev kit need to offer so a
+non-C++ app can host and call modules?" — three pieces, and the awkward part is
+that they currently live in three different repos.
+
+| # | Piece | Type(s) | Ships from | In this bundle as |
+| --- | --- | --- | --- | --- |
+| 1 | **Runtime lifecycle** | the `logos_core_*` C ABI | **logos-liblogos** (`src/logos_core/logos_core.h`) | `liblogos_core.so` |
+| 2 | **Provider hosting** | `LogosAPI`, `LogosAPIProvider` | **logos-liblogos** (`logos_api.h`, from the `logos-liblogos-headers` package) | `liblogos_qt_host.so` |
+| 3 | **Invocation + auth** | `LogosProviderObject`, `LogosAPIClient`, `TokenManager` | **logos-protocol** (`logos_provider_interface.h`, from the `logos-protocol-lib` package) | `liblogos_protocol.so` |
+
+**1 is solved and is what this PoC already does.** A plain C ABI, wrapped in
+`src/addon.cc` in an afternoon. Nothing about it is language-specific — the Rust
+PoC binds the same header.
+
+**2 is the barrier.** `LogosAPI` is a `QObject`, and registering a provider goes
+through Qt. There is no C ABI for it, so every language binding needs a C++ shim
+— and a Qt one at that, which is the whole portability complaint in
+`liblogos-rust-poc/QT_PORTABILITY_GAP.md`.
+
+**3 is half-solved, which is the frustrating part.** `logos_provider_interface.h`
+already defines a **"Universal interface"** alongside the Qt one:
+
+```cpp
+// Two parallel virtual interfaces:
+//   Qt interface:        callMethod / getMethods / setEventListener (pure virtual)
+//   Universal interface: callMethodStd / getMethodsStd / setEventListenerStd (defaulted)
+
+virtual nlohmann::json callMethodStd(const std::string& methodName,
+                                     const nlohmann::json& args);
+```
+
+Strings and JSON — exactly the shape a C ABI or an FFI binding wants. But the
+*hosting* side (piece 2) and the *token handshake* (`TokenManager`,
+`LogosAPIClient::invokeRemoteMethod`) are still Qt C++, so the universal
+interface cannot be reached from outside without one.
+
+**The smallest thing that would unlock every language**, in order of how much it
+would help:
+
+1. **A C ABI for provider registration** — `logos_provider_register(name,
+   transports_json, callback)` over the universal `callMethodStd` shape. That
+   alone makes piece 2 bindable from Rust, Go, Node or Python with no Qt.
+2. **Publish `capability_module` over plain transport.** Today it publishes
+   nothing there (`getMethods() -> 0 methods`), which is why direct invocation
+   hangs; fixing it makes the existing `lp_*` C ABI sufficient for *consuming*
+   modules, which `logos-js-sdk` already binds.
+3. **Ship `core_service` as a library, not only inside the `logosctl` binary.**
+   It is already written and already Qt-free in its dispatch; it is just not
+   reachable except by running the CLI.
+
+Given (1) or (3), 0.3.0 stops being a C++ project and becomes a binding.
+
 ## Option 3 in full: be the daemon
 
 The endgoal is that the Electron app *is* the runtime — no `logosctl` process
