@@ -70,10 +70,16 @@ smoke: build
 
 # Proves the binding survives inside Electron's main process, headlessly — the
 # Qt/Chromium coexistence question, answered without a human clicking anything.
-# The sandbox is disabled inside electron-smoke.js, not here, so it applies
-# however the script is invoked — see the comment there.
+# ELECTRON_DISABLE_SANDBOX, not app.commandLine.appendSwitch('no-sandbox').
+#
+# The switch is applied too late: Chromium brings up its SUID sandbox helper
+# before any line of the script runs, so it aborts with "The SUID sandbox helper
+# binary was found, but is not configured correctly" regardless. The helper is
+# not root-owned mode 4755 in a node_modules checkout on a CI runner, and
+# unprivileged user namespaces are not guaranteed there either. The environment
+# variable is read during that early startup, so it actually takes effect.
 verify: build-electron
-	$(SHELL_RUN) npx electron scripts/electron-smoke.js $(MODULE)
+	$(SHELL_RUN) env ELECTRON_DISABLE_SANDBOX=1 npx electron scripts/electron-smoke.js $(MODULE)
 
 # NOT offscreen: Electron owns the display connection, and Qt here is only
 # driving module hosts, not drawing anything.
