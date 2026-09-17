@@ -1,13 +1,13 @@
 # 0.2.0 — driving the module
 
 > **Reading this cold?** The one-paragraph version: this PoC loads
-> `delivery_module` but never calls it. Calling a module directly from a
-> Qt-free consumer does not work (§"The mechanism, pinned down"). The design
-> everyone else uses is to go through `core_service`, a gateway module that
-> proxies calls. The endgoal is to host that gateway inside this addon
-> (§"Option 3 in full"); the next concrete step is to confirm the gateway
-> design works at all, using a real `logosctl` daemon (§"Confirm with the CLI
-> first" — currently unfinished, and exactly where to pick up).
+> `delivery_module` but never calls it. Calling a module *directly* from a
+> Qt-free consumer does not work (§"The mechanism, pinned down"). Going through
+> `core_service` — a gateway module that proxies calls — **does**, and is
+> confirmed end to end from Node (§"Status of that confirmation"). So 0.2.0 is
+> the gateway route with a `logosctl` daemon beside the app, and 0.3.0 hosts
+> that same gateway inside the addon so there is no daemon at all
+> (§"Option 3 in full"). See §"The plan, in two releases".
 >
 > Everything below was run, not reasoned. Repro targets:
 > `make probe-transport`, `make probe-sdk`, `make probe-core-service`.
@@ -208,7 +208,30 @@ Two things this reveals that the attempt above got wrong:
 
 ## What would unblock it
 
-In order of how well-trodden the path is:
+### The plan, in two releases
+
+**0.2.0 — the gateway route.** Confirmed working (above). The app runs a
+`logosctl` daemon alongside it, talks to `core_service` over loopback TCP with
+the SDK, and drives `delivery_module` through `callModuleMethod`. Remaining
+work is wiring, not research:
+
+1. Ship `logosctl` in the AppImage and spawn it from Electron's main process
+   (it is statically linked — only `libc` — and carries its own copy of the
+   runtime libraries, so it costs size but no new dependencies).
+2. Write its config, start it, read the token from `client/auto.json` **after**
+   the daemon boots, and install/load the modules.
+3. Replace the addon's `loadModule` path in the UI with SDK calls through the
+   gateway, then `createNode()` to actually start the Waku node.
+4. Subscribe with `watchModuleEvents` and stream `nodeStarted` /
+   `connectionStateChanged` into the log pane — the continuous activity the log
+   has been missing.
+
+Cost: two processes and a second copy of the runtime in the AppImage.
+
+**0.3.0 — as a lib.** Host `core_service` in the addon instead, as described
+below, and delete the daemon. Same UI, same SDK surface, one process.
+
+### The routes, in order of how well-trodden
 
 1. **Drive `logosctl` as a subprocess** — the supported route, and the one
    `logos-logoscore-py` takes. Electron's main process spawns
@@ -274,10 +297,48 @@ at the cost of one config file. If it fails there, hosting the same gateway
 in-process will not fare better, and that is worth knowing before committing to
 the C++.
 
-**Status of that confirmation: not yet obtained.** The daemon starts and binds
-`core_service` on 7001 and `capability_module` on 7002, but a JS client sees
-`getMethods() -> 0 methods` and no answer — the same signature as calling a
-module directly. Two things still to rule out:
+**Status of that confirmation: OBTAINED — the gateway route works.**
+
+A JS client called a real method on `delivery_module` through `core_service`
+over plain TCP:
+
+```
+core_service.getMethods() -> 16 methods
+  loadModule, callModuleMethod, watchModuleEvents, getStatus, …
+
+getStatus() -> {"daemon":{"pid":…,"status":"running"},"modules":[…]}
+
+callModuleMethod(delivery_module, getAvailableConfigs) ->
+  {"method":"getAvailableConfigs","module":"delivery_module",
+   "result":{"error":"Context not initialized","success":false,"value":null},
+   "status":"ok"}
+```
+
+`"status":"ok"` is the RPC round-trip succeeding. `"Context not initialized"` is
+**delivery_module's own answer** — it wants `createNode()` before
+`getAvailableConfigs()` means anything. That is the module talking, which is the
+whole point.
+
+**What made it work**, after an earlier run reported `0 methods` and no answer:
+
+- **A fresh token.** `~/.logosctl/client/auto.json` is rewritten on every daemon
+  boot. The failing run used one from a previous boot. A stale token does not
+  produce an auth error — the call simply never answers, which looks exactly
+  like the plain-transport hang and is why it was misread as one.
+- **TCP-only transports.** Listing `local` and `tcp` together validates, but the
+  daemon then dies silently mid-startup (log stops after capability_module, no
+  ports, no socket). TCP alone binds both ports and stays up. The cost is that
+  `logosctl`'s own client dials the local endpoint and reports `NO_DAEMON`
+  while this config is installed.
+- **Modules installed into the daemon's own store.** `logosctl package install
+  --file <pkg>/*.lgx`, then `logosctl module load delivery_module`, which pulls
+  in `lez_core`, `liblogos_lez_rln_module` and `liblogos_rln_module` by itself.
+  A module the daemon has not loaded answers `MODULE_NOT_LOADED` — a structured
+  reply, so even that failure proves the proxy path.
+
+Repro: `make probe-core-service`, or the commands under "Picking that up".
+
+Two things still worth understanding:
 
 - The transport list *replaces* the default rather than adding to it, so a
   `tcp`-only config leaves `logosctl`'s own client unable to find its daemon
