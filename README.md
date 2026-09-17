@@ -75,6 +75,10 @@ signals: nodeStarted(bool,QString,int)  connectionStateChanged(QString,int)
 is called, the module loads and then sits idle — which is also why the log stops
 after bring-up rather than showing continuous activity.
 
+Calling it was attempted; see [0.2.0](#next-actually-starting-a-node-020--attempted-blocked-upstream)
+below. It is reachable in metadata but not currently invocable from outside the
+process.
+
 Run with `LOGOS_LOG_LEVEL=debug` (the default here), the log does show each
 module coming up properly — publishing its surface and becoming reachable:
 
@@ -243,28 +247,31 @@ not load in Electron. Hence `make build` (plain Node, for `make smoke`) and
 `make build-electron` (everything else), writing to the same path; the targets
 depend on the right one so they cannot drift.
 
-## Next: actually starting a node (0.2.0)
+## Next: actually starting a node (0.2.0) — attempted, blocked upstream
 
-Driving the module does not need more C++. `logos-js-sdk` is a **Qt-free koffi
-wrapper** over the `lp_*` C ABI in `liblogos_protocol` — which this bundle
-already ships — so it talks to a module from plain Node:
+Calling `createNode()` was attempted and does not currently work from a Qt-free
+consumer. The full write-up is in [`NEXT.md`](./NEXT.md); the short version:
 
-```js
-const { LogosClient, tcp } = require('logos-js-sdk');
-const logos = new LogosClient('electron_poc', { transport: tcp('127.0.0.1', 6001) });
-const delivery = logos.module('delivery_module');
-await delivery.call('createNode', configJson);
-delivery.on('nodeStarted', (...) => …);
+**Works.** `logos_core_set_module_transports` and `logos_core_get_token` are
+bound, `delivery_module` binds a TCP port, and `logos-js-sdk` — a Qt-free koffi
+wrapper over `liblogos_protocol`, which this bundle already ships — connects and
+reads the module's whole interface (`createNode`, `start`, `stop`, `send`,
+`subscribe`). A capability token is obtainable and accepted.
+
+**Does not.** No invocation ever completes. Every call hangs with no error, and
+the module says why at load:
+
+```
+PlainTransportHost::publishObject: expected ModuleProxy for
+  "delivery_module__handshake" (plain transport only publishes ModuleProxy for now)
 ```
 
-The one piece of plumbing needed is a transport the SDK can reach: modules here
-bind only the default LocalSocket, so `logos_core_set_module_transports()` (also
-in `logos_core.h`, also unbound so far) has to give `delivery_module` a TCP
-transport before it is loaded.
+That string is inside `liblogos_protocol.so` — upstream, not a misconfiguration
+here. Giving `capability_module` its own TCP transport, and both
+`saveToken` and `informToken`, were tried and change nothing.
 
-That would turn "loads" into "runs": a real Waku node, `nodeStarted` and
-`connectionStateChanged` arriving continuously, and a log that keeps moving
-instead of stopping once bring-up finishes.
+Reproduce with `make probe-transport` and `make probe-sdk`; the latter is the
+one-command check for whether the upstream gap has closed.
 
 ## CI
 
