@@ -57,11 +57,23 @@ shows, and it is worth being precise about the gap:
 | Each module publishes its API on a transport | No module method is ever called |
 | RLN creates and unlocks a keystore | No membership is registered |
 
-Calling into a module is a different API: `LogosAPIClient`, the Qt-based remote
-invocation layer, which this addon does not wrap — it binds only the lifecycle
-functions in `logos_core.h`. The module exposes `connectionStatus`,
-`connectionStateChanged(QString,int)` and `stop()`, none of which are driven
-here. Making it actually deliver messages starts there.
+**No delivery API call is made.** This addon binds only the lifecycle functions
+in `logos_core.h`; calling into a module is a separate interface. The module's
+own surface is substantial and entirely untouched here:
+
+```
+createNode(QString)              getAvailableConfigs()    getNodeInfo(QString)
+channelCreate(...)               channelSend(...)         send(QString,QByteArray)
+storeQuery(...)                  subscribe / unsubscribe  configureRln(QString)
+stop()
+
+signals: nodeStarted(bool,QString,int)  connectionStateChanged(QString,int)
+         messageReceived(...)           channelMessageReceived(...)
+```
+
+`createNode()` is what would actually start the Waku node. Because none of this
+is called, the module loads and then sits idle — which is also why the log stops
+after bring-up rather than showing continuous activity.
 
 Run with `LOGOS_LOG_LEVEL=debug` (the default here), the log does show each
 module coming up properly — publishing its surface and becoming reachable:
@@ -206,6 +218,13 @@ and in a packaged app the user sees nothing at all.
 `ThreadSafeFunction`. The real stdout is `dup`'d first and still written to, so
 `make verify` and CI keep their output while the UI gets a copy.
 
+It must be a **`NonBlockingCall`**. `BlockingCall` waits for the main thread to
+drain the queue, and the main thread is blocked inside `loadModule()` for the
+whole bring-up — precisely when core does most of its logging. The reader thread
+stalls, the pipe fills, and core's own writes then block behind it: a deadlock
+that silently takes the terminal output with it. Dropping a chunk under pressure
+is the right trade for a log view.
+
 ### loadModule blocks the main process
 
 `logos_core_load_module` blocks until the module's host reports the plugin
@@ -223,6 +242,29 @@ Electron embeds its own Node/V8 ABI, so an addon built for the system Node will
 not load in Electron. Hence `make build` (plain Node, for `make smoke`) and
 `make build-electron` (everything else), writing to the same path; the targets
 depend on the right one so they cannot drift.
+
+## Next: actually starting a node (0.2.0)
+
+Driving the module does not need more C++. `logos-js-sdk` is a **Qt-free koffi
+wrapper** over the `lp_*` C ABI in `liblogos_protocol` — which this bundle
+already ships — so it talks to a module from plain Node:
+
+```js
+const { LogosClient, tcp } = require('logos-js-sdk');
+const logos = new LogosClient('electron_poc', { transport: tcp('127.0.0.1', 6001) });
+const delivery = logos.module('delivery_module');
+await delivery.call('createNode', configJson);
+delivery.on('nodeStarted', (...) => …);
+```
+
+The one piece of plumbing needed is a transport the SDK can reach: modules here
+bind only the default LocalSocket, so `logos_core_set_module_transports()` (also
+in `logos_core.h`, also unbound so far) has to give `delivery_module` a TCP
+transport before it is loaded.
+
+That would turn "loads" into "runs": a real Waku node, `nodeStarted` and
+`connectionStateChanged` arriving continuously, and a log that keeps moving
+instead of stopping once bring-up finishes.
 
 ## CI
 
