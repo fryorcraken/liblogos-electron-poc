@@ -61,7 +61,7 @@ LGX_DIRS = cap-lgx delivery-lgx rln-lgx lez-rln-lgx lez-core-lgx
 # built in, so installing the package over it is unnecessary.
 DAEMON_LGX_DIRS = lez-core-lgx lez-rln-lgx rln-lgx delivery-lgx
 
-.PHONY: build build-electron smoke verify run bundle appimage modules probe-transport probe-sdk probe-core-service probe-node clean
+.PHONY: build build-electron smoke verify verify-node run bundle appimage modules probe-transport probe-sdk probe-core-service probe-node exp-provider exp-provider-electron exp-node exp-electron exp-call exp-call-electron clean
 
 build:
 	$(SHELL_RUN) env LOGOS_LIBLOGOS_ROOT=$(LOGOS_LIBLOGOS_ROOT) npx node-gyp rebuild
@@ -156,6 +156,14 @@ probe-core-service:
 # not in a script that merely resembles it.
 probe-node:
 	$(SHELL_RUN) env MODULE=$(MODULE) node scripts/probe-node.js
+
+# The 0.2.0 counterpart to `verify`: the app's own IPC handler starting a node
+# inside Electron, checked by whether module events actually arrive. `verify`
+# proves the 0.1.0 claim (the addon loads the module); this proves the 0.2.0 one
+# (a node runs and keeps emitting), and they are separate mechanisms.
+verify-node: build-electron
+	$(SHELL_RUN) env ELECTRON_DISABLE_SANDBOX=1 MODULE=$(MODULE) \
+		npx electron scripts/electron-node-smoke.js
 
 # --- 0.3.0 research: can the addon HOST core_service in-process? -------------
 #
