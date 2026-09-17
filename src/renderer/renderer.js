@@ -13,12 +13,38 @@ function setStatus(text, state) {
   els.status.dataset.state = state;
 }
 
+// Autoscroll, but only while the view is already at the bottom — so scrolling
+// up to read something is not yanked back by the next line. A few pixels of
+// slack absorbs sub-pixel rounding at fractional zoom levels.
+function isPinnedToBottom() {
+  const { scrollTop, scrollHeight, clientHeight } = els.log;
+  return scrollHeight - scrollTop - clientHeight < 40;
+}
+
+// Scrolling is deferred to the next frame: lines arrive in bursts (80+ during a
+// module bring-up), and setting scrollTop per line makes the browser measure
+// layout each time, which both janks and lags behind the last append.
+let scrollQueued = false;
+function scrollToBottom() {
+  if (scrollQueued) return;
+  scrollQueued = true;
+  requestAnimationFrame(() => {
+    scrollQueued = false;
+    els.log.scrollTop = els.log.scrollHeight;
+  });
+}
+
+function appendLine(node) {
+  const pinned = isPinnedToBottom();
+  els.log.append(node);
+  if (pinned) scrollToBottom();
+}
+
 function log(message, isError = false) {
   const line = document.createElement('div');
   if (isError) line.className = 'err';
   line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-  els.log.append(line);
-  els.log.scrollTop = els.log.scrollHeight;
+  appendLine(line);
 }
 
 els.start.addEventListener('click', async () => {
@@ -32,6 +58,10 @@ els.start.addEventListener('click', async () => {
   try {
     const result = await window.logos.startDelivery();
     for (const line of result.log) log(line);
+    // The main process was blocked for the whole bring-up, so core's queued
+    // lines land in one burst around now. Force a scroll rather than relying on
+    // a frame callback that may not have run during the freeze.
+    els.log.scrollTop = els.log.scrollHeight;
 
     if (result.ok) {
       // "loaded", not "running": core reports that the module's plugin loaded
@@ -59,8 +89,7 @@ window.logos.onLog((line) => {
   const el = document.createElement('div');
   el.className = 'native';
   el.textContent = line;
-  els.log.append(el);
-  els.log.scrollTop = els.log.scrollHeight;
+  appendLine(el);
 });
 
 // Surface a broken addon immediately rather than on first click.

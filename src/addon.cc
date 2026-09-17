@@ -260,6 +260,9 @@ Napi::Value StartLogCapture(const Napi::CallbackInfo& info) {
   dup2(pipe_fds[1], STDERR_FILENO);
   close(pipe_fds[1]);
 
+  // Unlimited queue (0): the main thread is blocked inside loadModule() for the
+  // whole bring-up, so the queue has to absorb everything core logs in the
+  // meantime and drain once the thread is free again.
   auto tsfn = Napi::ThreadSafeFunction::New(env, info[0].As<Napi::Function>(),
                                             "logos-log-capture", 0, 1);
 
@@ -274,8 +277,14 @@ Napi::Value StartLogCapture(const Napi::CallbackInfo& info) {
         if (w <= 0) break;
         written += w;
       }
+      // NonBlockingCall, not BlockingCall. loadModule() blocks the main thread
+      // for the whole module bring-up, which is exactly when core logs most —
+      // and a BlockingCall waits for that thread to drain the queue. The reader
+      // thread would stall, the pipe would fill, and core's own writes would
+      // then block: a deadlock that takes the UI with it. Dropping a chunk
+      // under pressure is the right trade for a log view.
       std::string chunk(buffer, static_cast<size_t>(n));
-      tsfn.BlockingCall([chunk](Napi::Env cb_env, Napi::Function cb) {
+      tsfn.NonBlockingCall([chunk](Napi::Env cb_env, Napi::Function cb) {
         cb.Call({Napi::String::New(cb_env, chunk)});
       });
     }

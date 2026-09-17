@@ -177,17 +177,22 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-
-  // Subscribe the window to core's log stream, and start the capture on first
-  // window. Started here rather than at app.whenReady so a failure to load the
-  // addon still leaves a window in which to show the error.
-  logSubscribers.add(win);
   win.on('closed', () => logSubscribers.delete(win));
-  try {
-    captureNativeOutput();
-  } catch (err) {
-    console.error(`log capture unavailable: ${err.message}`);
-  }
+
+  // WAIT FOR THE RENDERER. loadFile is asynchronous, and webContents.send drops
+  // anything sent before the page is ready — so starting the capture here would
+  // redirect stdout into a pipe whose output goes nowhere, losing the terminal
+  // copy as well. did-finish-load is the first point at which the page can
+  // actually receive.
+  win.webContents.once('did-finish-load', () => {
+    logSubscribers.add(win);
+    try {
+      captureNativeOutput();
+    } catch (err) {
+      // The redirect failed, so this still reaches the real stdout.
+      console.error(`log capture unavailable: ${err.message}`);
+    }
+  });
 }
 
 // Headless self-test: bring up delivery, print the result, exit with a status.
