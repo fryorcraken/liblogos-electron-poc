@@ -247,7 +247,7 @@ not load in Electron. Hence `make build` (plain Node, for `make smoke`) and
 `make build-electron` (everything else), writing to the same path; the targets
 depend on the right one so they cannot drift.
 
-## Next: actually starting a node (0.2.0) — attempted, blocked upstream
+## Next: actually starting a node (0.2.0) — attempted, not done
 
 Calling `createNode()` was attempted and does not currently work from a Qt-free
 consumer. The full write-up is in [`NEXT.md`](./NEXT.md); the short version:
@@ -266,12 +266,27 @@ PlainTransportHost::publishObject: expected ModuleProxy for
   "delivery_module__handshake" (plain transport only publishes ModuleProxy for now)
 ```
 
-That string is inside `liblogos_protocol.so` — upstream, not a misconfiguration
-here. Giving `capability_module` its own TCP transport, and both
-`saveToken` and `informToken`, were tried and change nothing.
+Giving `capability_module` its own TCP transport, and both `saveToken` and
+`informToken`, were tried and change nothing.
 
-Reproduce with `make probe-transport` and `make probe-sdk`; the latter is the
-one-command check for whether the upstream gap has closed.
+**The SDK was probably the wrong route.** Other non-C++ clients do not invoke
+modules directly: `logos-logoscore-py` is "a thin layer over the `logoscore`
+CLI — every operation spawns a `logoscore <subcommand> --json` subprocess…
+no C++ bindings, no IPC code." The supported path is to drive `logosctl`, which
+holds a real `TokenManager`:
+
+```
+logosctl call MODULE METHOD [args...]
+logosctl watch MODULE [--event NAME]
+```
+
+The token is genuine access control — hashed-at-rest accepted tokens, a per-boot
+`auto.json` for same-host clients — not an obstacle to work around. The attempt
+above also never exposed `core_service`, which the working examples pair with
+`capability_module` on a separate port.
+
+Reproduce with `make probe-transport` and `make probe-sdk`. See
+[`NEXT.md`](./NEXT.md) for the three routes forward.
 
 ## CI
 

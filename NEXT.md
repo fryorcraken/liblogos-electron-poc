@@ -5,9 +5,10 @@ dependency chain on a machine with no Nix. It never calls the module. 0.2.0 was
 meant to close that gap — `createNode()`, a real Waku node, a log that keeps
 moving.
 
-**Status: blocked upstream.** Everything on this side works; the last hop does
-not. What follows is what was established by experiment, so the next person does
-not repeat it.
+**Status: not done, and the SDK route was probably the wrong one.** Everything
+up to the last hop works; no invocation completes. What follows is what was
+established by experiment, so the next person does not repeat it — including a
+conclusion that turned out to be wrong.
 
 ## What works
 
@@ -122,22 +123,63 @@ path. The SDK's `saveToken`/`informToken` are evidently not equivalent to it for
 a Qt target — which lines up with the plain-transport warning, and with the
 SDK's e2e test only ever talking to a JS provider.
 
+## How other non-C++ clients actually do it
+
+They do not invoke modules directly. `logos-logoscore-py` — "Python wrapper for
+the logoscore CLI — launch daemons, load modules, call methods, subscribe to
+events" — is explicit about its mechanism:
+
+> The wrapper is a thin layer over the `logoscore` CLI: every operation spawns a
+> `logoscore <subcommand> --json` subprocess and parses its output. **No C++
+> bindings, no IPC code.**
+
+So the supported route for a non-C++ language is to drive `logosctl`, a C++ Qt
+binary that holds a real `TokenManager`, and read its `--json` output:
+
+```
+logosctl call MODULE METHOD [args...]
+logosctl watch MODULE [--event NAME]
+```
+
+**The token is an access-control mechanism, not an obstacle to route around.**
+`logosctl`'s session directory has `tokens.json` ("hashed-at-rest accepted
+tokens"), per-client token files, and an `auto.json` the daemon rewrites each
+boot; the docs warn that plaintext `tcp` to a non-loopback host puts tokens on
+the wire in cleartext. A same-host, same-user client picks its token up from
+`auto.json` automatically; remote clients are issued one explicitly.
+
+Two things this reveals that the attempt above got wrong:
+
+- **`core_service`.** The working examples pair `core_service` *and*
+  `capability_module`, each on its own port ("two `QTcpServer`s can't share an
+  address:port"). The attempt above exposed `delivery_module` and
+  `capability_module` — there was no `core_service` for a client to talk to.
+- **Nothing here is a documented limitation.** "for now" in a warning string is
+  an implementation note, not a statement of intent, and it was wrong to
+  present it as one.
+
 ## What would unblock it
 
-One of, roughly in order of how much work they are for someone else:
+In order of how well-trodden the path is:
 
-1. **Upstream: publish the handshake surface over plain transport.** The "for
-   now" in that warning suggests it is known and intended. This is the clean fix
-   and everything here would then work unchanged.
-2. **Find the token protocol for plain transport.** If invocation is only
-   waiting on a token delivered a particular way, `informToken` (also on the
-   SDK client) may be the missing step — but the token's expected form and the
-   order of operations are undocumented here, and guessing at an auth handshake
-   is a poor use of time.
-3. **Wrap `LogosAPIClient` in the addon instead.** Abandons the Qt-free premise
-   and puts the Qt invocation layer back in C++, but it is the path liblogos
-   itself uses, so it is known to work. Bigger change: async results, event
-   subscription and Qt types all have to cross into JS.
+1. **Drive `logosctl` as a subprocess** — the supported route, and the one
+   `logos-logoscore-py` takes. Electron's main process spawns
+   `logosctl call delivery_module createNode …` and parses `--json`, and
+   `logosctl watch delivery_module` gives the event stream the log pane wants.
+   Costs: another binary in the bundle, and a subprocess per call. Buys: the
+   token handling, transports and error reporting are all somebody else's
+   solved problem, and this is how the Python wrapper ships today.
+2. **Retry the SDK with `core_service` exposed.** The attempt above may simply
+   have had the wrong topology — no `core_service` on its own port. Worth one
+   experiment before concluding anything about plain transport, since
+   `make probe-sdk` already does everything else.
+3. **Wrap `LogosAPIClient` in the addon.** Abandons the Qt-free premise and puts
+   the Qt invocation layer back in C++, but it is what liblogos itself uses, so
+   it is known to work. Bigger change: async results, event subscription and Qt
+   types all have to cross into JS.
+
+Option 1 is what a real app should do. Option 2 is the cheap experiment that
+would say whether the SDK route was ever viable.
 
 ## Also worth knowing
 
