@@ -54,28 +54,28 @@ shows, and it is worth being precise about the gap:
 | --- | --- |
 | The plugin loads; `DeliveryModuleImpl` constructs | No Waku node is started |
 | The dependency graph resolves and loads in order | No peers, no connections, no messages |
-| The C ABI is fully reachable from Electron | No module method is ever called |
+| Each module publishes its API on a transport | No module method is ever called |
+| RLN creates and unlocks a keystore | No membership is registered |
 
 Calling into a module is a different API: `LogosAPIClient`, the Qt-based remote
 invocation layer, which this addon does not wrap — it binds only the lifecycle
 functions in `logos_core.h`. The module exposes `connectionStatus`,
 `connectionStateChanged(QString,int)` and `stop()`, none of which are driven
-here.
+here. Making it actually deliver messages starts there.
 
-One consequence is already visible in the log:
+Run with `LOGOS_LOG_LEVEL=debug` (the default here), the log does show each
+module coming up properly — publishing its surface and becoming reachable:
 
 ```
-[liblogos_rln_module] membership module: host provided no
-  instance_persistence_path — keystore ops will fail
+[delivery_module] RemoteTransportHost: Created registry host with URL:
+  "local:logos_delivery_module_65f10ec52244"
+[delivery_module] LogosAPIProvider: successfully published "delivery_module"
+[liblogos_rln_module] keystore auto-unlock at init: created (0 membership(s))
 ```
 
-That is `logos_core_set_persistence_base_path()`, which this PoC never calls, so
-RLN keystore operations would fail if anything asked for them.
-
-Making the module actually deliver messages means wrapping `LogosAPIClient` and
-setting a persistence path — a larger piece of work, and the obvious next step.
-The packaging question this PoC set out to answer is settled independently of
-it.
+That keystore line is the effect of `logos_core_set_persistence_base_path()`,
+which the app points at a directory under `userData`. Without it the same module
+reports `host provided no instance_persistence_path — keystore ops will fail`.
 
 ## What it does
 
@@ -193,6 +193,18 @@ electron-builder puts it — which `bundle-runtime.js` patches in place.
 shell, where `LOGOS_LIBLOGOS_ROOT` is unset and the wrong Qt is on the
 pkg-config path — so it either fails outright or silently produces a binary
 linked against the system Qt.
+
+### Core's log needs an fd-level capture, not a JS one
+
+liblogos logs through spdlog, and the module hosts are separate processes whose
+output core forwards — all of it written straight to file descriptors 1 and 2.
+None of it passes through Node, so wrapping `process.stdout.write` sees nothing,
+and in a packaged app the user sees nothing at all.
+
+`startLogCapture` in `src/addon.cc` therefore redirects both fds into a
+`pipe(2)` and reads them back on a thread, forwarding each chunk to JS through a
+`ThreadSafeFunction`. The real stdout is `dup`'d first and still written to, so
+`make verify` and CI keep their output while the UI gets a copy.
 
 ### loadModule blocks the main process
 
