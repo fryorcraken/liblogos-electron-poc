@@ -18,6 +18,7 @@ const core = require('../src/index.js');
 const modulesDir = path.join(__dirname, '..', 'modules');
 const MODULE = 'delivery_module';
 const PORT = Number(process.env.PROBE_PORT || 6001);
+const CAP_PORT = Number(process.env.PROBE_CAP_PORT || 6002);
 
 // The SDK loads liblogos_protocol itself, separately from the addon. In the
 // packaged app this points into the bundle; here, at the nix result.
@@ -28,18 +29,41 @@ if (!process.env.LOGOS_PROTOCOL_LIB) {
 }
 
 async function main() {
+  const tcpSet = (port) =>
+    JSON.stringify([{ protocol: 'tcp', host: '127.0.0.1', port, codec: 'json' }]);
+
   core.init();
   core.addModulesDir(modulesDir);
-  core.setModuleTransports(
-    MODULE,
-    JSON.stringify([{ protocol: 'tcp', host: '127.0.0.1', port: PORT, codec: 'json' }])
-  );
+  core.setModuleTransports(MODULE, tcpSet(PORT));
+
+  // capability_module NEEDS ONE TOO. LogosClient dials it for a per-target
+  // token (opts.capabilityTransport, defaulting to the target's transport), so
+  // with capability_module on LocalSocket the SDK cannot reach it — and every
+  // call then hangs waiting on a token lookup that never lands.
+  //
+  // It is loaded by start(), so its transport must be registered before that.
+  core.setModuleTransports('capability_module', tcpSet(CAP_PORT));
+
   core.start();
 
   if (!core.loadModule(MODULE)) {
     throw new Error(`${MODULE} failed to load`);
   }
-  console.log(`\n${MODULE} loaded and listening on 127.0.0.1:${PORT}`);
+  console.log(`\n${MODULE} loaded`);
+
+  // Which ports actually got bound. If capability_module is not on CAP_PORT,
+  // the token lookup has nowhere to go and every call hangs regardless of what
+  // was registered.
+  try {
+    const { execFileSync } = require('node:child_process');
+    const listening = execFileSync('ss', ['-ltn'], { encoding: 'utf8' });
+    for (const port of [PORT, CAP_PORT]) {
+      const bound = listening.split('\n').some((l) => l.includes(`:${port}`));
+      console.log(`  port ${port}: ${bound ? 'LISTENING' : 'not bound'}`);
+    }
+  } catch {
+    console.log('  (ss unavailable — cannot check ports)');
+  }
 
   // A token, to skip a handshake that plain transport cannot carry. The key
   // format is not documented here, so try the plausible spellings and report
@@ -53,7 +77,12 @@ async function main() {
   }
 
   const { LogosClient, tcp } = require('logos-js-sdk');
-  const logos = new LogosClient('electron_poc', { transport: tcp('127.0.0.1', PORT) });
+  const logos = new LogosClient('electron_poc', {
+    transport: tcp('127.0.0.1', PORT),
+    // Named explicitly: it defaults to the TARGET's transport, which would dial
+    // delivery_module's port looking for capability_module.
+    capabilityTransport: tcp('127.0.0.1', CAP_PORT),
+  });
   const delivery = logos.module(MODULE);
 
   if (token !== null) {

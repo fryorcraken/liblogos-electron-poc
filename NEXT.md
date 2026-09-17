@@ -70,6 +70,26 @@ Consistent with that, the SDK's own e2e test (`test/e2e.js`) is **JS client → 
 provider**, with both halves agreeing on an arbitrary token string. Nothing in
 it exercises a JS client against a C++ Qt module, which is the path this needs.
 
+### Ruled out: the capability transport
+
+`LogosClient` takes a `capabilityTransport` (defaulting to the target's), because
+it dials `capability_module` for a per-target token. An obvious theory was that
+calls hung because `capability_module` was still on LocalSocket, unreachable
+from the SDK.
+
+It is not that. Giving `capability_module` its own TCP transport on a second
+port, and pointing `capabilityTransport` at it explicitly, changes nothing:
+
+```
+  port 6001: LISTENING     (delivery_module)
+  port 6002: LISTENING     (capability_module)
+  …both log the same handshake warning, and every call still hangs
+```
+
+So the limitation is not about which modules have a transport. It is that a
+plain transport does not publish the surface an invocation needs, whichever
+module is behind it. `make probe-sdk` reproduces this.
+
 ## What would unblock it
 
 One of, roughly in order of how much work they are for someone else:
