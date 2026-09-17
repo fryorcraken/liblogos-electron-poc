@@ -61,7 +61,7 @@ LGX_DIRS = cap-lgx delivery-lgx rln-lgx lez-rln-lgx lez-core-lgx
 # built in, so installing the package over it is unnecessary.
 DAEMON_LGX_DIRS = lez-core-lgx lez-rln-lgx rln-lgx delivery-lgx
 
-.PHONY: build build-electron smoke verify verify-node run bundle appimage modules probe-transport probe-sdk probe-core-service probe-node exp-provider exp-provider-electron exp-node exp-electron exp-call exp-call-electron clean
+.PHONY: build build-electron smoke verify verify-node run bundle appimage modules probe-transport probe-sdk probe-core-service probe-node exp-provider exp-provider-electron exp-node exp-electron exp-call exp-call-electron exp-event clean
 
 build:
 	$(SHELL_RUN) env LOGOS_LIBLOGOS_ROOT=$(LOGOS_LIBLOGOS_ROOT) npx node-gyp rebuild
@@ -211,6 +211,17 @@ exp-call: exp-provider
 exp-call-electron: exp-provider-electron
 	$(SHELL_RUN) env ELECTRON_DISABLE_SANDBOX=1 MODULE=$(MODULE) \
 		npx electron $(EXP_DIR)/exp-call-electron.js
+
+# EXPERIMENT 3: event subscription. docs/0.3.0-inventory.md §5.2 names this the
+# only inventory item with no experimental evidence, and the one most likely to
+# surface something ugly — so it runs BEFORE anything is built on top of it.
+#
+# Distinguishes "never armed" (fatal) from "armed but silent" (a question about
+# the trigger) from "delivered". EXP_TRIGGER=0 skips createNode and answers only
+# the arming half, which is the half that decides whether 0.3.0 is possible.
+exp-event: exp-provider
+	$(SHELL_RUN) env QT_QPA_PLATFORM=offscreen MODULE=$(MODULE) \
+		node $(EXP_DIR)/exp-event-host.js
 
 clean:
 	rm -rf build dist runtime-bundle $(EXP_DIR)/build

@@ -67,9 +67,21 @@ channelCreate(...)               channelSend(...)         send(QString,QByteArra
 storeQuery(...)                  subscribe / unsubscribe  configureRln(QString)
 stop()
 
-signals: nodeStarted(bool,QString,int)  connectionStateChanged(QString,int)
-         messageReceived(...)           channelMessageReceived(...)
+events:  connectionStateChanged  messageReceived  messageSent
+         messageError            messagePropagated
 ```
+
+The events are NOT one Qt signal each: the module declares a single
+`eventResponse(QString eventName, QVariantList data)` and puts the name in the
+first argument (`delivery_module_plugin.h:23-51`), with every payload element a
+`QString`. An earlier revision of this list said `nodeStarted(bool,QString,int)`
+and `connectionStateChanged(QString,int)`, which was wrong on both counts.
+
+`nodeStarted` is a genuine oddity worth keeping: it appears nowhere in
+`logos-delivery-module`'s source, and is nevertheless delivered at runtime —
+`make exp-event` catches it, arriving from the liblogosdelivery FFI layer rather
+than the plugin's own mapping. Subscribing with an empty event name (the
+wildcard) is therefore the only way to be sure of seeing everything.
 
 `createNode()` is what would actually start the Waku node. Because none of this
 is called, the module loads and then sits idle — which is also why the log stops
