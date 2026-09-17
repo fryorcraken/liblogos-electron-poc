@@ -59,11 +59,15 @@ jobs:
       - name: Install modules
         run: make modules
 
-      # --ignore-scripts: the postinstall would run node-gyp outside the dev
-      # shell, where LOGOS_LIBLOGOS_ROOT is unset. The Makefile builds the addon
-      # properly in the steps below.
+      # --ignore-scripts stops THIS package's postinstall, which would run
+      # node-gyp outside the dev shell with LOGOS_LIBLOGOS_ROOT unset. But it
+      # also skips electron's own postinstall, which is what downloads the
+      # Electron binary — without it, `npx electron` dies with "Electron failed
+      # to install correctly". So the download is run explicitly afterwards.
       - name: Install JS dependencies
-        run: npm ci --ignore-scripts
+        run: |
+          npm ci --ignore-scripts
+          node node_modules/electron/install.js
 
       # Proves the module actually loads before anything is packaged, so a
       # broken AppImage is never published. Electron needs an X display even

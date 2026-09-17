@@ -44,6 +44,7 @@ const addon = loadAddon();
 module.exports = {
   init: addon.init,
   addModulesDir: addon.addModulesDir,
+  setPersistenceBasePath: addon.setPersistenceBasePath,
   start: addon.start,
   cleanup: addon.cleanup,
 
@@ -52,6 +53,13 @@ module.exports = {
   knownModules: addon.knownModules,
   loadedModules: addon.loadedModules,
   refreshModules: addon.refreshModules,
+
+  /**
+   * Redirect fds 1 and 2 into a pipe and invoke `onChunk(text)` for everything
+   * written there — the only way to see spdlog output, which never passes
+   * through Node. Output is still echoed to the real stdout. Idempotent.
+   */
+  startLogCapture: addon.startLogCapture,
 
   /** Parsed form of logos_core_get_modules_info(). See logos_core.h for the shape. */
   modulesInfo() {

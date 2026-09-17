@@ -18,4 +18,12 @@ async function call(channel, ...args) {
 contextBridge.exposeInMainWorld('logos', {
   status: () => call('logos:status'),
   startDelivery: () => call('logos:startDelivery'),
+
+  /** Subscribe to core's log stream. Lines arrive as they are written. */
+  onLog: (callback) => {
+    // The listener is wrapped rather than passed through, so the renderer never
+    // receives the IpcRendererEvent — which would hand it a bridge back into
+    // the main process.
+    ipcRenderer.on('logos:log', (_event, line) => callback(line));
+  },
 });

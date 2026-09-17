@@ -52,6 +52,17 @@ els.start.addEventListener('click', async () => {
   }
 });
 
+// Core's own log, streamed from the native side. These are the module's real
+// messages — spdlog output from core and from each module host — not this
+// renderer's commentary, so they are marked to tell them apart.
+window.logos.onLog((line) => {
+  const el = document.createElement('div');
+  el.className = 'native';
+  el.textContent = line;
+  els.log.append(el);
+  els.log.scrollTop = els.log.scrollHeight;
+});
+
 // Surface a broken addon immediately rather than on first click.
 window.logos.status().then((status) => {
   if (status.addonLoaded) {

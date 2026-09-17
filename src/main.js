@@ -46,7 +46,51 @@ function configureEnvironment() {
   if (fs.existsSync(hostPath)) {
     process.env.LOGOS_HOST_PATH = hostPath;
   }
-  return hostPath;
+
+  // Core reads this at startup and passes it to the module hosts. Default to
+  // debug so the UI shows what the modules are actually doing — at the default
+  // level most of a module's own lifecycle is invisible.
+  if (!process.env.LOGOS_LOG_LEVEL) {
+    process.env.LOGOS_LOG_LEVEL = 'debug';
+  }
+
+  // Each module instance gets its own subdirectory here. Without it the RLN
+  // membership module warns that "keystore ops will fail" — it has nowhere to
+  // put a keystore.
+  const persistenceDir = path.join(app.getPath('userData'), 'module-instances');
+  fs.mkdirSync(persistenceDir, { recursive: true });
+
+  return { hostPath, persistenceDir };
+}
+
+// CAPTURING CORE'S LOG.
+//
+// liblogos and the module hosts write to the process's stdout/stderr file
+// descriptors from C++, so nothing in JS sees them — in a packaged app they go
+// nowhere the user can read. Patching process.stdout.write is not enough for
+// the same reason: the writes never pass through Node.
+//
+// So the fds themselves are redirected into a pipe, which is then read back in
+// JS and forwarded to the renderer (and still echoed to the real stdout, so
+// `make verify` and CI keep their output).
+const logSubscribers = new Set();
+
+function broadcastLog(text) {
+  for (const line of text.split('\n')) {
+    const trimmed = line.trimEnd();
+    if (trimmed === '') continue;
+    for (const win of logSubscribers) {
+      if (!win.isDestroyed()) win.webContents.send('logos:log', trimmed);
+    }
+  }
+}
+
+// Starts the addon's fd-level capture and pumps what it reads to the renderer.
+// The redirect itself lives in C++ (see captureOutput in addon.cc) because
+// spdlog writes to the file descriptor, never through Node.
+function captureNativeOutput() {
+  const core = getRuntime();
+  core.startLogCapture((text) => broadcastLog(text));
 }
 
 // Lazily required so a build or link failure surfaces in the UI as a message
@@ -97,7 +141,7 @@ handle('logos:status', () => {
 handle('logos:startDelivery', () => {
   const core = getRuntime();
   const { modulesDir } = runtimePaths();
-  const hostPath = configureEnvironment();
+  const { hostPath, persistenceDir } = configureEnvironment();
   const log = [];
 
   if (!fs.existsSync(modulesDir)) {
@@ -105,10 +149,13 @@ handle('logos:startDelivery', () => {
   }
   log.push(`modules dir: ${modulesDir}`);
   log.push(`logos_host: ${hostPath}`);
+  log.push(`persistence: ${persistenceDir}`);
+  log.push(`log level: ${process.env.LOGOS_LOG_LEVEL}`);
 
   const started = Date.now();
   core.init();
   core.addModulesDir(modulesDir);
+  core.setPersistenceBasePath(persistenceDir);
   core.start();
   log.push(`runtime started · known: ${core.knownModules().join(', ')}`);
 
@@ -130,6 +177,17 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  // Subscribe the window to core's log stream, and start the capture on first
+  // window. Started here rather than at app.whenReady so a failure to load the
+  // addon still leaves a window in which to show the error.
+  logSubscribers.add(win);
+  win.on('closed', () => logSubscribers.delete(win));
+  try {
+    captureNativeOutput();
+  } catch (err) {
+    console.error(`log capture unavailable: ${err.message}`);
+  }
 }
 
 // Headless self-test: bring up delivery, print the result, exit with a status.
@@ -139,13 +197,14 @@ async function runSmokeTest() {
   try {
     const core = getRuntime();
     const { modulesDir } = runtimePaths();
-    const hostPath = configureEnvironment();
+    const { hostPath, persistenceDir } = configureEnvironment();
     console.log(`modules dir: ${modulesDir}`);
     console.log(`logos_host:  ${hostPath}`);
 
     const started = Date.now();
     core.init();
     core.addModulesDir(modulesDir);
+    core.setPersistenceBasePath(persistenceDir);
     core.start();
     console.log(`known: ${core.knownModules().join(', ')}`);
 

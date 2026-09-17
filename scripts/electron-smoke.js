@@ -15,6 +15,9 @@ const moduleName = process.argv[2] || 'test_basic_module';
 
 app.disableHardwareAcceleration();
 
+// Core reads this at startup and passes it to the module hosts.
+process.env.LOGOS_LOG_LEVEL = process.env.LOGOS_LOG_LEVEL || 'debug';
+
 app.whenReady().then(() => {
   let failed = false;
   try {
@@ -23,6 +26,10 @@ app.whenReady().then(() => {
 
     core.init();
     core.addModulesDir(modulesDir);
+    // Without this the RLN membership module warns that keystore ops will fail.
+    const persistenceDir = path.join(app.getPath('userData'), 'module-instances');
+    require('node:fs').mkdirSync(persistenceDir, { recursive: true });
+    core.setPersistenceBasePath(persistenceDir);
     core.start();
     console.log('runtime started');
     console.log(`known: ${core.knownModules().join(', ')}`);

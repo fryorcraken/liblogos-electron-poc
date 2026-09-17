@@ -21,8 +21,11 @@
 
 #include <QCoreApplication>
 
+#include <unistd.h>
+
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 extern "C" {
@@ -119,6 +122,18 @@ Napi::Value AddModulesDir(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
+// Each module instance gets {path}/{module_name}/{instance_id}/. Without it the
+// RLN membership module has nowhere to put a keystore and says so. Must be
+// called before start().
+Napi::Value SetPersistenceBasePath(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  RequireState(env, g_initialized, "call init() before setPersistenceBasePath()");
+  RequireState(env, !g_started, "call setPersistenceBasePath() before start()");
+  const std::string dir = RequireStringArg(info, 0, "path");
+  logos_core_set_persistence_base_path(dir.c_str());
+  return env.Undefined();
+}
+
 Napi::Value Start(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   RequireState(env, g_initialized, "call init() before start()");
@@ -205,9 +220,77 @@ Napi::Value RefreshModules(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
+// --- log capture ------------------------------------------------------------
+
+// liblogos logs through spdlog, and the module hosts are separate processes
+// whose output core forwards — all of it written straight to file descriptors 1
+// and 2. None of it passes through Node, so JS cannot see it by wrapping
+// process.stdout.write; in a packaged app it goes nowhere the user can read.
+//
+// So both fds are redirected into a pipe. A reader thread pulls from the pipe
+// and hands each chunk to JS through a ThreadSafeFunction, while also writing it
+// back to the REAL stdout (kept as a dup) so the terminal still shows
+// everything — `make verify` and CI depend on that.
+bool g_capturing = false;
+
+Napi::Value StartLogCapture(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (g_capturing) {
+    return env.Undefined();
+  }
+  if (info.Length() < 1 || !info[0].IsFunction()) {
+    throw Napi::TypeError::New(env, "a callback function is required");
+  }
+
+  int pipe_fds[2];
+  if (pipe(pipe_fds) != 0) {
+    throw Napi::Error::New(env, "pipe() failed");
+  }
+
+  // Keep the real stdout so output still reaches the terminal.
+  const int real_stdout = dup(STDOUT_FILENO);
+  if (real_stdout < 0) {
+    close(pipe_fds[0]);
+    close(pipe_fds[1]);
+    throw Napi::Error::New(env, "dup(stdout) failed");
+  }
+
+  // Point both fds at the pipe's write end.
+  dup2(pipe_fds[1], STDOUT_FILENO);
+  dup2(pipe_fds[1], STDERR_FILENO);
+  close(pipe_fds[1]);
+
+  auto tsfn = Napi::ThreadSafeFunction::New(env, info[0].As<Napi::Function>(),
+                                            "logos-log-capture", 0, 1);
+
+  std::thread([read_fd = pipe_fds[0], real_stdout, tsfn]() mutable {
+    char buffer[4096];
+    ssize_t n;
+    while ((n = read(read_fd, buffer, sizeof(buffer))) > 0) {
+      // Echo to the terminal first, so ordering there matches what was written.
+      ssize_t written = 0;
+      while (written < n) {
+        const ssize_t w = write(real_stdout, buffer + written, n - written);
+        if (w <= 0) break;
+        written += w;
+      }
+      std::string chunk(buffer, static_cast<size_t>(n));
+      tsfn.BlockingCall([chunk](Napi::Env cb_env, Napi::Function cb) {
+        cb.Call({Napi::String::New(cb_env, chunk)});
+      });
+    }
+    tsfn.Release();
+    close(read_fd);
+  }).detach();
+
+  g_capturing = true;
+  return env.Undefined();
+}
+
 Napi::Object InitAddon(Napi::Env env, Napi::Object exports) {
   exports.Set("init", Napi::Function::New(env, Init));
   exports.Set("addModulesDir", Napi::Function::New(env, AddModulesDir));
+  exports.Set("setPersistenceBasePath", Napi::Function::New(env, SetPersistenceBasePath));
   exports.Set("start", Napi::Function::New(env, Start));
   exports.Set("cleanup", Napi::Function::New(env, Cleanup));
 
@@ -217,6 +300,7 @@ Napi::Object InitAddon(Napi::Env env, Napi::Object exports) {
   exports.Set("loadedModules", Napi::Function::New(env, LoadedModules));
   exports.Set("modulesInfoJson", Napi::Function::New(env, ModulesInfoJson));
   exports.Set("refreshModules", Napi::Function::New(env, RefreshModules));
+  exports.Set("startLogCapture", Napi::Function::New(env, StartLogCapture));
 
   // Mirrors LogosLoadDeps. The header pins these numbers and forbids
   // renumbering, so exposing them by value is safe.
