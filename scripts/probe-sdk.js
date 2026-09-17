@@ -86,8 +86,17 @@ async function main() {
   const delivery = logos.module(MODULE);
 
   if (token !== null) {
-    // Pre-seed it so the target skips the capability handshake entirely.
+    // Two different things, and it is not obvious which this path needs:
+    //   saveToken   — purely local, so the target "skips the handshake"
+    //   informToken — registers the token WITH capability_module, which is what
+    //                 LogosAPIClient's TokenManager does on the C++ side
     console.log(`\nsaveToken(${MODULE}, <token>) -> ${logos.saveToken(MODULE, token)}`);
+    try {
+      const informed = delivery.informToken(token, MODULE, token);
+      console.log(`informToken(<token>, ${MODULE}, <token>) -> ${informed}`);
+    } catch (err) {
+      console.log(`informToken failed: ${err.message}`);
+    }
   } else {
     console.log('\nno token found — calls will likely hang on the handshake');
   }

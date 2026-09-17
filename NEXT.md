@@ -90,6 +90,38 @@ So the limitation is not about which modules have a transport. It is that a
 plain transport does not publish the surface an invocation needs, whichever
 module is behind it. `make probe-sdk` reproduces this.
 
+### Ruled out: both token mechanisms
+
+The SDK offers two, and neither helps:
+
+| call | what it does | result |
+| --- | --- | --- |
+| `saveToken(module, token)` | local pre-seed, "so a target skips the capability handshake" | returns `true`, calls still hang |
+| `informToken(auth, module, token)` | registers the token *with* `capability_module` | returns `true`, calls still hang |
+
+The token itself is real — `logos_core_get_token("delivery_module")` returns
+one, and both calls accept it. It is not a token problem.
+
+### What the C++ client has that the SDK does not
+
+`logos_api_client.h` describes precisely the topology built here — "CLI on host
+→ core_service over TCP, but capability_module also over TCP on a sibling port"
+— so TCP invocation clearly does work through `LogosAPIClient`. Its constructor
+takes a **`TokenManager*`** alongside the two transports:
+
+```cpp
+LogosAPIClient(const QString& module_to_talk_to,
+               const QString& origin_module,
+               TokenManager* token_manager,
+               const LogosTransportConfig& target_transport,
+               const LogosTransportConfig& capability_transport, …);
+```
+
+That token manager participates in the `requestModule` handshake on the hot
+path. The SDK's `saveToken`/`informToken` are evidently not equivalent to it for
+a Qt target — which lines up with the plain-transport warning, and with the
+SDK's e2e test only ever talking to a JS provider.
+
 ## What would unblock it
 
 One of, roughly in order of how much work they are for someone else:
