@@ -266,8 +266,20 @@ PlainTransportHost::publishObject: expected ModuleProxy for
   "delivery_module__handshake" (plain transport only publishes ModuleProxy for now)
 ```
 
-Giving `capability_module` its own TCP transport, and both `saveToken` and
-`informToken`, were tried and change nothing.
+The cause is now pinned down. Asking each module for its interface over its own
+TCP port:
+
+| module | `getMethods()` |
+| --- | --- |
+| `delivery_module` | full interface — `createNode`, `start`, `stop`, … |
+| `capability_module` | **0 methods** |
+
+Its port is bound, but nothing is published behind it. The SDK's per-target
+token lookup dials that surface, finds nothing, and waits — hence a hang rather
+than a refusal. Giving `capability_module` its own transport, calling as the
+trusted `core_service` identity, and both `saveToken` and `informToken` were all
+tried; none of them helps, because the token flow is not reachable over a plain
+transport at all.
 
 **The SDK was probably the wrong route.** Other non-C++ clients do not invoke
 modules directly: `logos-logoscore-py` is "a thin layer over the `logoscore`

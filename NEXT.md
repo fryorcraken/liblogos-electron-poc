@@ -91,6 +91,35 @@ So the limitation is not about which modules have a transport. It is that a
 plain transport does not publish the surface an invocation needs, whichever
 module is behind it. `make probe-sdk` reproduces this.
 
+### The mechanism, pinned down
+
+Two more experiments settle what is actually happening.
+
+**`core_service` is not a module.** It is a privileged *caller identity*.
+`module_manager.cpp` keeps `kTrustedCallers = {"core", "core_service"}`, "always
+allowed past the dependency check, so they're never locked out", and the same
+two plus `capability_module` are never restricted as targets. So there is no
+`core_service` to give a transport to — but the origin identity a client calls
+*as* does matter. Calling as `core_service` instead of `electron_poc` changes
+nothing: every call still hangs. It is not an authorization failure.
+
+**`capability_module` publishes nothing over plain transport.** This is the
+actual cause. Asking each module for its interface over its own TCP port:
+
+| module | `getMethods()` |
+| --- | --- |
+| `delivery_module` | full interface — `createNode`, `start`, `stop`, `send`, `subscribe`, … |
+| `capability_module` | **0 methods** |
+
+Its port is bound and accepts connections; there is simply nothing published
+behind it. The SDK's per-target token lookup dials that surface, finds nothing
+to talk to, and waits — which is exactly why calls hang forever instead of
+being refused. It matches the load-time warning about
+`capability_module__handshake` precisely.
+
+So the token flow is not reachable over a plain transport at all, and no amount
+of token plumbing on the client side can substitute for it.
+
 ### Ruled out: both token mechanisms
 
 The SDK offers two, and neither helps:
@@ -169,17 +198,22 @@ In order of how well-trodden the path is:
    Costs: another binary in the bundle, and a subprocess per call. Buys: the
    token handling, transports and error reporting are all somebody else's
    solved problem, and this is how the Python wrapper ships today.
-2. **Retry the SDK with `core_service` exposed.** The attempt above may simply
-   have had the wrong topology — no `core_service` on its own port. Worth one
-   experiment before concluding anything about plain transport, since
-   `make probe-sdk` already does everything else.
+2. ~~Retry the SDK with `core_service` exposed.~~ **Done — it does not help.**
+   `core_service` is a caller identity, not a module, and calling as it changes
+   nothing. The blocker is that `capability_module` publishes no methods over a
+   plain transport, so the token lookup has nothing to reach. See "The
+   mechanism, pinned down" above.
 3. **Wrap `LogosAPIClient` in the addon.** Abandons the Qt-free premise and puts
    the Qt invocation layer back in C++, but it is what liblogos itself uses, so
    it is known to work. Bigger change: async results, event subscription and Qt
    types all have to cross into JS.
+4. **Upstream: publish `capability_module` over plain transport.** Would make
+   the SDK route work as originally hoped, and `make probe-sdk` is the check for
+   whether it has happened.
 
-Option 1 is what a real app should do. Option 2 is the cheap experiment that
-would say whether the SDK route was ever viable.
+**Option 1 is the one to take.** It is the supported path, it is what the Python
+wrapper ships today, and it needs no upstream change. Option 3 is the fallback
+if spawning a subprocess per call is unacceptable.
 
 ## Also worth knowing
 

@@ -76,8 +76,18 @@ async function main() {
     if (value && token === null) token = value;
   }
 
+  // WHO WE CALL AS. module_manager.cpp keeps a kTrustedCallers list —
+  // {"core", "core_service"} — that is "always allowed past the dependency
+  // check, so they're never locked out", and the same two plus
+  // capability_module are never restricted as targets.
+  //
+  // So the origin identity is not cosmetic, and "electron_poc" is an
+  // unprivileged stranger. Try a trusted one too.
+  const origin = process.env.PROBE_ORIGIN || 'electron_poc';
+  console.log(`\ncalling as origin module: ${origin}`);
+
   const { LogosClient, tcp } = require('logos-js-sdk');
-  const logos = new LogosClient('electron_poc', {
+  const logos = new LogosClient(origin, {
     transport: tcp('127.0.0.1', PORT),
     // Named explicitly: it defaults to the TARGET's transport, which would dial
     // delivery_module's port looking for capability_module.
@@ -119,6 +129,20 @@ async function main() {
         setTimeout(() => reject(new Error(`${label} did not answer within ${ms}ms`)), ms)
       ),
     ]);
+
+  // Does capability_module answer on ITS port? getMethods() against it is the
+  // control: if the target answers introspection but capability_module does
+  // not, the token lookup has nowhere to land and every call waits forever.
+  try {
+    const cap = logos.module('capability_module');
+    const capMethods = cap.getMethods();
+    console.log(
+      `\ncapability_module.getMethods() -> ${capMethods.length} methods` +
+        (capMethods.length ? ` (${capMethods.slice(0, 4).map((m) => m.name).join(', ')}…)` : '')
+    );
+  } catch (err) {
+    console.log(`\ncapability_module.getMethods() failed: ${err.message}`);
+  }
 
   // Only methods getMethods() actually reported. getAvailableConfigs is in the
   // Qt metadata but was not in that list, which may itself be the answer.
