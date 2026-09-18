@@ -28,25 +28,8 @@
       #status[data-state='working'] { color: #b7791f; }
       #status[data-state='ok']      { color: #217a3c; }
       #status[data-state='error']   { color: #c0392b; }
-      .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-      button { padding: 9px 18px; font: inherit; font-weight: 600; }
+      button { padding: 9px 18px; font: inherit; font-weight: 600; align-self: flex-start; }
       button:disabled { opacity: 0.5; }
-      button.secondary { font-weight: 400; opacity: 0.85; }
-      /* The live half: connection state and a running event count, so the pane
-         is not the only evidence that something is still happening. */
-      #conn {
-        display: flex;
-        gap: 8px;
-        align-items: baseline;
-        font-size: 13px;
-        font-variant-numeric: tabular-nums;
-      }
-      #conn .label { color: GrayText; }
-      #conn .label:not(:first-child) { margin-left: 12px; }
-      #connState { font-weight: 600; }
-      #connState[data-state='Connected'] { color: #217a3c; }
-      #connState[data-state='PartiallyConnected'] { color: #b7791f; }
-      #connState[data-state='Disconnected'] { color: #c0392b; }
       pre {
         flex: 1;
         background: color-mix(in srgb, Canvas 92%, CanvasText);
@@ -62,32 +45,32 @@
       /* Core's own spdlog output, as opposed to this page's commentary. */
       .native { color: color-mix(in srgb, CanvasText 72%, Canvas); }
       .native:first-letter { font-weight: 600; }
+      /* A module EVENT: the node itself talking. Given its own weight because
+         it is the strongest evidence on the page that something is running. */
+      .event { color: #217a3c; font-weight: 600; }
+      .row { display: flex; gap: 10px; align-items: center; }
     </style>
   </head>
   <body>
     <div>
       <h1>liblogos · Electron PoC</h1>
       <p class="sub">
-        Runs a <code>logosctl</code> daemon beside the app and drives the Logos
-        <code>delivery</code> module through its <code>core_service</code>
-        gateway — <code>createNode()</code>, <code>start()</code>, and a live
-        event stream. The gateway is what lets the Qt-free JS SDK call a module;
-        see <code>NEXT.md</code>.
+        Three ways to reach the Logos <code>delivery</code> module, side by
+        side. <strong>Load only</strong> uses <code>liblogos_core</code>'s C ABI
+        and stops there — it cannot call the module.
+        <strong>via logosctl</strong> drives a daemon beside the app through its
+        <code>core_service</code> gateway. <strong>in-process</strong> calls the
+        module from the addon itself, with no daemon at all. The last two both
+        start a real Waku node; see the README for what each one proves.
       </p>
     </div>
 
     <div id="status" data-state="idle">Ready.</div>
 
     <div class="row">
-      <button id="start">Start Waku node</button>
-      <button id="load" class="secondary">Load module only (0.1.0)</button>
-    </div>
-
-    <div id="conn" hidden>
-      <span class="label">connection</span>
-      <span id="connState">—</span>
-      <span class="label">events</span>
-      <span id="eventCount">0</span>
+      <button id="loadOnly">Load only (C ABI)</button>
+      <button id="viaLogosctl">Start node via logosctl</button>
+      <button id="viaInProcess">Start node in-process</button>
     </div>
 
     <pre id="log"></pre>

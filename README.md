@@ -74,45 +74,71 @@ PASS: a Waku node is running and delivery_module is emitting
 ### What each release demonstrates
 
 `logos_core.h` defines a loaded module as one whose **plugin has loaded in its
-host process** — not one that is doing any work. 0.1.0 shows exactly that and no
-more; 0.2.0 shows the module working. They are separate mechanisms, so it is
-worth being precise about which claim rests on which:
+host process** — not one that is doing any work. The app keeps all three routes
+side by side, one button each, because each proves something the others do not:
 
-| | 0.1.0 — the addon, in-process | 0.2.0 — the gateway, via a daemon |
-| --- | --- | --- |
-| Mechanism | `liblogos_core`'s C ABI from an N-API addon | `logosctl` daemon's `core_service`, over loopback TCP |
-| The plugin loads; `DeliveryModuleImpl` constructs | yes | yes |
-| The dependency graph resolves and loads in order | yes | yes |
-| RLN creates and unlocks a keystore | yes | yes |
-| A module method is called | **no** | **yes** — `createNode`, `start`, `getAvailableConfigs` |
-| A Waku node is started | **no** | **yes** — `start()` returns success |
-| Peers are connected | **no** | **yes** — `connectionStateChanged` reaches `Connected` |
-| The log keeps moving after bring-up | **no** | **yes** — module events stream into the pane |
+| | Load only (0.1.0) | via logosctl (0.2.0) | in-process (0.3.0) |
+| --- | --- | --- | --- |
+| Mechanism | `liblogos_core`'s C ABI | `logosctl` daemon's `core_service`, over loopback TCP | `LogosAPIClient` from the addon, default LocalSocket/QtRO |
+| Needs C++? | no — plain C, bindable anywhere | no — the JS SDK is Qt-free koffi | **yes** — `LogosAPI` is a `QObject` |
+| Second process? | no | **yes** — a daemon beside the app | no |
+| The plugin loads; `DeliveryModuleImpl` constructs | yes | yes | yes |
+| The dependency graph resolves in order | yes | yes | yes |
+| RLN creates and unlocks a keystore | yes | yes | yes |
+| A module method is called | **no** | yes — `createNode`, `start` | yes — `createNode`, `start` |
+| A Waku node is started | **no** | yes | yes |
+| Peers are connected | **no** | yes — reaches `Connected` | yes — reaches `Connected` |
+| The check | `make verify-appimage` | `make verify-node` | `make verify-inproc` |
 
-**Still not demonstrated, in either.** No message is sent or received: `send()`
-and `subscribe()` are reachable through the same gateway call but nothing here
-exercises them, so `messageSent` / `messageReceived` have never fired in a run.
-No RLN membership is registered — the keystore is created and unlocked but
-empty, which is why the `logos.test` preset is used rather than the
-RLN-protected `twn`.
+The first row is the finding: **only calling a module in-process requires C++**,
+because `LogosAPI`/`LogosAPIClient` are `QObject`s with no C ABI. Loading
+modules and consuming them from another process are both plain C. See
+[What has to be FFI-wrapped](#what-has-to-be-ffi-wrapped-and-what-is-only-glue).
 
-The module's surface, for reference — everything on the first two lines is
-reachable through `callModuleMethod` today:
+**Still not demonstrated, by any route.** No message is sent or received:
+`send()` and `subscribe()` are reachable but nothing here exercises them, so
+`messageSent` / `messageReceived` have never fired in a run. No RLN membership
+is registered — the keystore is created and unlocked but empty, which is why the
+`logos.test` preset is used rather than the RLN-protected `twn`.
+
+The module's own surface, for reference:
 
 ```
 createNode(QString)              getAvailableConfigs()    getNodeInfo(QString)
 send(QString,QString)            subscribe / unsubscribe  configureRln(QString)
 start()                          stop()
 
-events: connectionStateChanged(status, timestamp)
-        messageReceived(hash, contentTopic, base64Payload, timestamp)
-        messageSent / messageError / messagePropagated
+events:  connectionStateChanged  messageReceived  messageSent
+         messageError            messagePropagated
 ```
 
-Note there is **no `nodeStarted` event**, despite what an earlier draft of this
-file claimed. `createNode()` and `start()` are synchronous calls returning a
-bool, so "the node started" is their return value; the continuous traffic comes
-from `connectionStateChanged` as peers come and go.
+The events are NOT one Qt signal each: the module declares a single
+`eventResponse(QString eventName, QVariantList data)` and puts the name in the
+first argument (`delivery_module_plugin.h:23-51`), with every payload element a
+`QString`. An earlier revision of this list said `nodeStarted(bool,QString,int)`
+and `connectionStateChanged(QString,int)`, which was wrong on both counts.
+
+`nodeStarted` is a genuine oddity worth keeping: it appears nowhere in
+`logos-delivery-module`'s source, and is nevertheless delivered at runtime —
+`make exp-event` catches it, arriving from the liblogosdelivery FFI layer rather
+than the plugin's own mapping. Subscribing with an empty event name (the
+wildcard) is therefore the only way to be sure of seeing everything.
+
+`createNode()` is what actually starts the Waku node, and 0.3.0 calls it —
+which is why the log no longer stops after bring-up. It takes a JSON *document*
+of `WakuNodeConf` fields, not a config name; a `preset` is what gives the node
+somebody to dial, where `{}` starts one that sits silent:
+
+```json
+{"mode": "Core", "preset": "logos.test"}
+```
+
+Reaching it from OUTSIDE the process needs a gateway: a Qt-free consumer cannot
+speak the default LocalSocket/QtRO transport, and `capability_module` publishes
+nothing over a plain one, so the token handshake never completes and calls hang.
+0.2.0 solves that by talking to a `logosctl` daemon's `core_service`, which does
+the invocation in-process on its side. 0.3.0 skips the intermediary entirely,
+because the addon is itself a Qt participant on the bus the modules already use.
 
 Run with `LOGOS_LOG_LEVEL=debug` (the default here), the log does show each
 module coming up properly — publishing its surface and becoming reachable:
@@ -144,6 +170,93 @@ reports `host provided no instance_persistence_path — keystore ops will fail`.
 
 The UI is two buttons — start a node (0.2.0), or load the module only (0.1.0).
 This is a packaging and embedding PoC, not a module browser.
+
+## What has to be FFI-wrapped, and what is only glue
+
+The question this PoC exists to answer, for anyone sizing the same work in
+another language. Every file and line below is in this repo and runs.
+
+### The dividing line
+
+Two of the three things an app needs are **plain C** and bind from any language.
+The third is **Qt C++** and does not.
+
+| What you need | Interface | Bindable without C++? |
+| --- | --- | --- |
+| Start the runtime, load modules | `logos_core_*` C ABI | **yes** — plain C |
+| Consume a module from another process | `lp_*` C ABI in `liblogos_protocol` | **yes** — [logos-js-sdk](https://github.com/logos-co/logos-js-sdk) binds it with koffi, no compiler |
+| **Call a module in-process** | `LogosAPI` / `LogosAPIClient`, C++ | **no** — both are `QObject`s with no C ABI |
+
+That third row is the whole finding. It is why this repo contains a compiled
+addon rather than a `koffi` script, and it is the one thing a Logos dev kit
+would have to change to make module-calling reachable from Rust, Go or Python.
+
+### 1. The FFI wrapper — `src/addon.cc` (629 lines)
+
+The only C++ in the project. Two distinct halves:
+
+**(a) The C ABI half — mechanical, would be identical in any language.** Each of
+these is a few lines forwarding to a `logos_core_*` call:
+
+| JS | C ABI | Line |
+| --- | --- | --- |
+| `init()` | `logos_core_init` | [`addon.cc:139`](src/addon.cc#L139) |
+| `addModulesDir()` | `logos_core_add_modules_dir` | [`:157`](src/addon.cc#L157) |
+| `setPersistenceBasePath()` | `logos_core_set_persistence_base_path` | [`:168`](src/addon.cc#L168) |
+| `start()` / `cleanup()` | `logos_core_start` / `_cleanup` | [`:193`](src/addon.cc#L193), [`:414`](src/addon.cc#L414) |
+| `loadModule()` | `logos_core_load_module` | [`:444`](src/addon.cc#L444) |
+| `knownModules()` / `loadedModules()` | `logos_core_get_*_modules` | [`:475`](src/addon.cc#L475), [`:481`](src/addon.cc#L481) |
+
+[`liblogos-rust-poc`](../liblogos-rust-poc) binds this same surface in Rust, so
+none of it is Node-specific.
+
+**(b) The Qt C++ half — the part that cannot be FFI'd:**
+
+| Piece | Why C++ is unavoidable | Line |
+| --- | --- | --- |
+| `QCoreApplication` construction | liblogos requires one before `start()`; no C API creates it | [`addon.cc:55`](src/addon.cc#L55) |
+| `callModule()` → `LogosAPIClient::invokeRemoteMethod` | `LogosAPIClient` is a `QObject`; this is the irreducible core | [`:264`](src/addon.cc#L264) (`CallModuleWorker`), [`:323`](src/addon.cc#L323) |
+| `watchModule()` → `onEventWhenAvailable` | Qt signal delivery into a `ThreadSafeFunction` | [`:364`](src/addon.cc#L364) |
+| Qt event-loop pump | `processEvents()` — without it `callModule` silently waits out its 20 s timeout | [`:232`](src/addon.cc#L232) |
+
+**~190 of the 629 lines are this half.** That is the real cost of the gap.
+
+### 2. The glue — JavaScript, no compiler
+
+Everything else is ordinary application code:
+
+| File | Lines | Job |
+| --- | --- | --- |
+| [`src/index.js`](src/index.js) | 196 | Loads the `.node`, parses JSON, drives the pump as an unref'd `setInterval` |
+| [`src/main.js`](src/main.js) | 333 | Electron main: owns the runtime, IPC handlers, headless self-test |
+| [`src/daemon.js`](src/daemon.js) | 241 | 0.2.0 only: supervises a `logosctl` child process |
+| [`src/gateway.js`](src/gateway.js) | 222 | 0.2.0 only: drives the module through `core_service` |
+| [`src/preload.js`](src/preload.js) | 41 | `contextBridge` surface |
+
+### 3. The build and packaging glue
+
+Not FFI, but the part that actually took the longest — see
+[Findings](#findings):
+
+| File | Lines | Job |
+| --- | --- | --- |
+| [`binding.gyp`](binding.gyp) | 39 | node-gyp target; links `logos_core`, `logos_qt_host`, `logos_protocol`, Qt |
+| [`scripts/gyp-config.js`](scripts/gyp-config.js) | 141 | Resolves liblogos + Qt flags (gyp cannot call pkg-config itself) |
+| [`scripts/bundle-runtime.js`](scripts/bundle-runtime.js) | 244 | Walks the `NEEDED` closure, rewrites every `RUNPATH` to `$ORIGIN` |
+
+`bundle-runtime.js` is the one to read if you are packaging Nix-built libraries
+anywhere: every `.so` names its dependencies by absolute `/nix/store` path, so a
+bundle that is merely copied resolves nothing.
+
+### Summary for sizing the work
+
+- **~190 lines of Qt C++** is the irreducible part, and only because
+  `LogosAPI`/`LogosAPIClient` have no C ABI.
+- **~440 lines of C++** are a mechanical C-ABI wrapper any language can replace.
+- **~1,000 lines of JS** are glue with no compiler involved.
+- **~420 lines of build/packaging** glue, mostly rpath surgery for Nix output.
+- Adding in-process calling cost **zero AppImage size** — every library it links
+  was already bundled.
 
 ## Layout
 

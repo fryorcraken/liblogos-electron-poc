@@ -19,6 +19,27 @@ const { Gateway } = require('./gateway.js');
 // default in index.js) resolves and loads first.
 const MODULE_NAME = 'delivery_module';
 
+// THE NODE CONFIG, and why this one.
+//
+// createNode takes a flat JSON object of WakuNodeConf fields, not a config name
+// — passing a name answers "createNode cfg is not valid JSON". Unknown keys are
+// ignored and every field has a default, so "{}" is accepted; it is the wrong
+// choice, because with no entry nodes there is nobody to dial and the node sits
+// silent. That is the "log goes quiet after bring-up" problem this release
+// exists to fix, wearing a different hat.
+//
+// A `preset` populates cluster id, entry nodes and sharding together, and its
+// bootstrap nodes are where the connection traffic comes from. Valid names are
+// "", "twn", "logos.dev", "logos.test" and "status.prod". "twn" is the
+// RLN-protected Waku Network and would additionally need a registered
+// membership, which this PoC does not have.
+//
+// Only mode/preset at the top level, deliberately: any OTHER bare top-level key
+// (logLevel is the easy one to reach for) silently selects the backend's legacy
+// flat WakuNodeConf shape instead of this one. Both parse; they are different
+// code paths.
+const NODE_CONFIG = JSON.stringify({ mode: 'Core', preset: 'logos.test' });
+
 // WHERE THE RUNTIME LIVES, which differs between a checkout and a packaged app.
 //
 //   packaged   resources/runtime/{modules,lib,bin} inside the AppImage
@@ -102,6 +123,16 @@ function broadcastLog(text) {
   }
 }
 
+// Module events, on their own channel rather than folded into the log stream.
+// They are structured — a name and a payload — and the renderer marks them
+// differently, because "the node told us something" and "spdlog wrote a line"
+// are not the same kind of evidence.
+function broadcastModuleEvent(event, args) {
+  for (const win of logSubscribers) {
+    if (!win.isDestroyed()) win.webContents.send('logos:moduleEvent', { event, args });
+  }
+}
+
 // Starts the addon's fd-level capture and pumps what it reads to the renderer.
 // The redirect itself lives in C++ (see captureOutput in addon.cc) because
 // spdlog writes to the file descriptor, never through Node.
@@ -149,13 +180,13 @@ handle('logos:status', () => {
   }
 });
 
-// The whole demo in one call: bring up core, load delivery, report.
+// Bring up core and load delivery.
 //
-// NOTE: this blocks the main process for the entire bring-up — see the
-// threading comment in addon.cc. For delivery that means starting Waku, so the
-// window is unresponsive for seconds. Deliberate: a PoC that hid this behind a
-// worker thread would be demonstrating the worker, not the binding.
-handle('logos:startDelivery', () => {
+// NOTE: loadModule blocks the main process for the whole bring-up — see the
+// threading comment in addon.cc. Deliberate: a PoC that hid this behind a worker
+// thread would be demonstrating the worker, not the binding. The node start
+// below is the part that had to stop blocking, and it does.
+handle('logos:loadOnly', () => {
   const core = getRuntime();
   const { modulesDir } = runtimePaths();
   const { hostPath, persistenceDir } = configureEnvironment();
@@ -186,11 +217,14 @@ handle('logos:startDelivery', () => {
 // THE 0.2.0 PATH: a daemon beside the app, and the module driven through its
 // core_service gateway.
 //
-// This is deliberately NOT the addon. The addon (logos:startDelivery above)
-// loads the module into THIS process and cannot call it; the daemon loads its
-// own copy into its own process and can. Running both would bring the module up
-// twice for no benefit, so the button drives this one and the addon stays as
-// what 0.1.0 proved — see the README.
+// This is deliberately NOT the addon. The addon (logos:loadOnly above) loads the
+// module into THIS process and cannot call it; the daemon loads its own copy
+// into its own process and can. 0.3.0 below closes that gap without a daemon at
+// all — the three are kept side by side because each proves something the others
+// do not. See the README's FFI-vs-glue section.
+//
+// Only one may run at a time: each brings delivery_module up, and two copies
+// would contend for the same ports and persistence directory.
 let daemon = null;
 let gateway = null;
 // The in-flight start, so a second caller joins it instead of starting a
@@ -201,17 +235,18 @@ let gateway = null;
 // a headless run and a button click overlapped.
 let startInFlight = null;
 
-handle('logos:startNode', () => {
+handle('logos:startViaLogosctl', () => {
   if (gateway) return Promise.resolve({ alreadyRunning: true });
+  requireNoRouteRunning('startViaLogosctl');
   if (!startInFlight) {
-    startInFlight = startNode().finally(() => {
+    startInFlight = startViaLogosctl().finally(() => {
       startInFlight = null;
     });
   }
   return startInFlight;
 });
 
-async function startNode() {
+async function startViaLogosctl() {
   const { logosctl, packageDir, protocolLib, qtPluginPath } = runtimePaths();
   if (!fs.existsSync(logosctl)) {
     throw new Error(`logosctl not found at ${logosctl}`);
@@ -269,6 +304,74 @@ async function startNode() {
     modules: (status && status.modules ? status.modules : []).map((m) => m.name),
     watched,
   };
+}
+
+// THE 0.3.0 PAYOFF: a real Waku node, started from the Electron app, with no
+// daemon beside it and no gateway in between.
+//
+// 0.2.0 reached this point by spawning a logosctl daemon and talking to its
+// core_service over loopback TCP. This calls the module directly over the
+// default LocalSocket/QtRO transport that every module already publishes on —
+// which the addon can speak because it is a Qt participant in the same process,
+// and which the JS SDK could not, because it is not.
+let nodeStarted = false;
+
+handle('logos:startViaInProcess', async () => {
+  const core = getRuntime();
+  if (nodeStarted) throw new Error('the node is already running');
+  requireNoRouteRunning('startViaInProcess');
+
+  const log = [];
+  const say = (line) => {
+    log.push(line);
+    broadcastLog(line);
+  };
+
+  // SUBSCRIBE FIRST, and with the wildcard.
+  //
+  // Before createNode because the module wires its own event callback only on
+  // createNode's success path, so a subscription taken afterwards can miss the
+  // first connectionStateChanged. The empty event name means every event on the
+  // module: it is what this log pane wants, and it is the only spelling that
+  // cannot be silently wrong, since a subscription arms happily on names the
+  // module never emits.
+  const subscriptionId = core.watchModule(MODULE_NAME, '', broadcastModuleEvent);
+  say(`watchModule(${MODULE_NAME}, *) -> id=${subscriptionId}`);
+  if (subscriptionId === 0) throw new Error('the event subscription was refused');
+
+  // createNode then start, the module's documented order (createNode exactly
+  // once per context; start before any message operation). Both are awaited
+  // rather than blocking: invokeRemoteMethod has a 20s default timeout and this
+  // is the main process.
+  say(`createNode(${NODE_CONFIG})`);
+  const created = await core.callModule(MODULE_NAME, 'createNode', [NODE_CONFIG]);
+  say(`  -> ${JSON.stringify(created)}`);
+  if (created && created.success === false) {
+    throw new Error(`createNode refused: ${created.error || 'no reason given'}`);
+  }
+
+  say('start() — bringing the Waku node up');
+  const started = await core.callModule(MODULE_NAME, 'start', []);
+  say(`  -> ${JSON.stringify(started)}`);
+  if (started && started.success === false) {
+    throw new Error(`start refused: ${started.error || 'no reason given'}`);
+  }
+
+  nodeStarted = true;
+  return { ok: true, subscriptionId };
+});
+
+// One route at a time. Each brings delivery_module up, so two of them running
+// together contend for the same ports and the same persistence directory —
+// and the resulting failure looks like a transport bug rather than the
+// self-inflicted collision it is.
+function requireNoRouteRunning(attempted) {
+  if (gateway || startInFlight) {
+    throw new Error(`the logosctl route is already running; restart before ${attempted}`);
+  }
+  if (nodeStarted) {
+    throw new Error(`the in-process route is already running; restart before ${attempted}`);
+  }
 }
 
 function createWindow() {

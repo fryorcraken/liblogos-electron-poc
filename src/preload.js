@@ -15,13 +15,32 @@ async function call(channel, ...args) {
   return reply.value;
 }
 
+// THREE ROUTES, NAMED FOR WHAT THEY ACTUALLY DO.
+//
+// The app keeps all three side by side deliberately: they are the evidence
+// behind the README's FFI-vs-glue comparison, and each proves something the
+// others do not.
+//
+//   loadOnly            0.1.0 — logos_core_*'s C ABI. Loads the module and
+//                       stops there; it cannot call it. Plain C, bindable from
+//                       any language.
+//   startViaLogosctl    0.2.0 — a logosctl daemon beside the app, driven over
+//                       its core_service gateway with the Qt-free JS SDK.
+//   startViaInProcess   0.3.0 — the addon calls the module itself. No daemon,
+//                       no gateway, no transport. Needs Qt C++.
 contextBridge.exposeInMainWorld('logos', {
   status: () => call('logos:status'),
-  startDelivery: () => call('logos:startDelivery'),
 
-  /** Start the daemon, load the module, and bring a real Waku node up through
-   *  the core_service gateway. This is what 0.2.0 added. */
-  startNode: () => call('logos:startNode'),
+  /** 0.1.0: load delivery_module through the C ABI. Loads only — nothing here
+   *  can call the module, which is the gap the other two close. */
+  loadOnly: () => call('logos:loadOnly'),
+
+  /** 0.2.0: start the daemon, load the module into it, and bring a real Waku
+   *  node up through the core_service gateway. */
+  startViaLogosctl: () => call('logos:startViaLogosctl'),
+
+  /** 0.3.0: createNode() + start() from the addon, in this process. */
+  startViaInProcess: () => call('logos:startViaInProcess'),
 
   /** Subscribe to core's log stream. Lines arrive as they are written. */
   onLog: (callback) => {
@@ -31,9 +50,15 @@ contextBridge.exposeInMainWorld('logos', {
     ipcRenderer.on('logos:log', (_event, line) => callback(line));
   },
 
-  /** The module's own events, forwarded by the daemon: connectionStateChanged,
-   *  messageReceived and friends. Structured, unlike the log stream. */
-  onEvent: (callback) => {
-    ipcRenderer.on('logos:event', (_event, payload) => callback(payload));
+  /** The module's own events: connectionStateChanged and friends. Separate from
+   *  onLog because these are structured and mean something stronger — the
+   *  module talking, not a line of spdlog output.
+   *
+   *  Both routes deliver here in the same shape, so the renderer does not care
+   *  which one produced the event. */
+  onModuleEvent: (callback) => {
+    ipcRenderer.on('logos:moduleEvent', (_event, message) =>
+      callback(message.event, message.args)
+    );
   },
 });

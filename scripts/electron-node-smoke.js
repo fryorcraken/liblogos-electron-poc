@@ -57,8 +57,8 @@ async function main() {
     };
   }
 
-  console.log(`starting a node via logos:startNode (module: ${MODULE})…\n`);
-  const reply = await invoke('logos:startNode');
+  console.log(`starting a node via logos:startViaLogosctl (module: ${MODULE})…\n`);
+  const reply = await invoke('logos:startViaLogosctl');
   if (!reply.ok) throw new Error(reply.error);
 
   console.log(`\ndaemon modules: ${reply.value.modules.join(', ')}`);
