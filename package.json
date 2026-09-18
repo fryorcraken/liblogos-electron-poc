@@ -1,6 +1,6 @@
 {
   "name": "liblogos-electron-poc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Proof of concept: an Electron app that loads a Logos Core module through liblogos_core's C ABI, via an N-API addon.",
   "main": "src/main.js",

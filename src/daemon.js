@@ -83,10 +83,11 @@ class Daemon {
    * @param {string} opts.packageDir where the .lgx packages live
    * @param {(line: string) => void} opts.log
    */
-  constructor({ binary, configDir, packageDir, log }) {
+  constructor({ binary, configDir, packageDir, qtPluginPath, log }) {
     this.binary = binary;
     this.configDir = configDir;
     this.packageDir = packageDir;
+    this.qtPluginPath = qtPluginPath || null;
     this.log = log || (() => {});
     this.started = false;
   }
@@ -95,8 +96,20 @@ class Daemon {
   // through this one variable. Pointing it at a directory under the app's
   // userData keeps the PoC from colliding with a logosctl the user runs by hand,
   // and makes the daemon's state disappear with the app's.
+  //
+  // QT_PLUGIN_PATH matters only in the packaged case, where the binary we ship
+  // is the UNWRAPPED one. In a Nix checkout `logosctl` is a wrapper that sets
+  // this itself, to absolute /nix/store paths that do not exist on a user's
+  // machine — so bundle-runtime.js copies the wrapped binary instead and this
+  // supplies what the wrapper used to. Qt dlopens its TLS and platform backends
+  // by path, invisibly to a NEEDED-closure walk, so without it the daemon starts
+  // and then fails at the first network operation.
   env() {
-    return { ...process.env, LOGOSCTL_CONFIG_DIR: this.configDir };
+    const env = { ...process.env, LOGOSCTL_CONFIG_DIR: this.configDir };
+    if (this.qtPluginPath && fs.existsSync(this.qtPluginPath)) {
+      env.QT_PLUGIN_PATH = this.qtPluginPath;
+    }
+    return env;
   }
 
   run(args, { timeoutMs = 120000 } = {}) {
@@ -112,6 +125,36 @@ class Daemon {
     });
   }
 
+  /** Kill whatever still holds the gateway port, and wait for it to let go.
+   *
+   *  A blunt instrument, used only when `daemon stop` has already been tried and
+   *  the port is still held — which under a tcp-only config is the normal case
+   *  rather than an exceptional one. `ss` is used rather than `lsof` because the
+   *  probe scripts already depend on it. */
+  async killByPort() {
+    const pids = await new Promise((resolve) => {
+      execFile('ss', ['-ltnp', `sport = :${CORE_PORT}`], { timeout: 10000 }, (err, stdout) => {
+        if (err) return resolve([]);
+        const found = new Set();
+        for (const match of String(stdout).matchAll(/pid=(\d+)/g)) found.add(Number(match[1]));
+        resolve([...found]);
+      });
+    });
+    for (const pid of pids) {
+      try {
+        process.kill(pid, 'SIGTERM');
+        this.log(`  sent SIGTERM to pid ${pid}`);
+      } catch {
+        // Already gone.
+      }
+    }
+    for (let i = 0; i < 20; i += 1) {
+      if (!(await canConnect(CORE_PORT))) return true;
+      await delay(500);
+    }
+    return false;
+  }
+
   /** Bring the daemon up and load `moduleName` in it. Idempotent-ish: a daemon
    *  left over from a previous run is stopped first, because `daemon start`
    *  refuses a second daemon in the same session dir and a stale one holds an
@@ -121,6 +164,16 @@ class Daemon {
 
     this.log('stopping any daemon left from a previous run');
     await this.run(['daemon', 'stop'], { timeoutMs: 20000 });
+
+    // `daemon stop` above answers NO_DAEMON for a tcp-only daemon even when one
+    // IS running (it dials the local endpoint this config removes), so a stale
+    // daemon survives it and keeps the ports. The next start then comes up
+    // without binding, and every call hangs against the OLD daemon's rotated
+    // token. Checking the port is the only reliable way to notice.
+    if (await canConnect(CORE_PORT)) {
+      this.log(`port ${CORE_PORT} is still held; stopping the daemon holding it`);
+      await this.killByPort();
+    }
 
     const configPath = path.join(this.configDir, 'daemon-node.yaml');
     fs.writeFileSync(configPath, daemonConfig());
@@ -145,6 +198,20 @@ class Daemon {
     for (const line of started.stdout.split('\n')) {
       if (line.trim()) this.log(line.trim());
     }
+
+    // THE PID, because `daemon stop` cannot stop this daemon.
+    //
+    // The CLI's stop dials the LOCAL endpoint, and the tcp-only config above
+    // removes it — so stop answers NO_DAEMON while the daemon is plainly
+    // running and holding both ports. Observed exactly that: an orphaned daemon
+    // from a previous run kept 7001/7002 bound, and every subsequent start
+    // failed to bind until it was killed by pid.
+    //
+    // --detach prints "Daemon started (pid NNNN)", which is the only handle we
+    // get. Signalling it is the fallback, not the preference: stop() still tries
+    // the clean path first.
+    const pidMatch = started.stdout.match(/pid\s+(\d+)/i);
+    this.pid = pidMatch ? Number(pidMatch[1]) : null;
 
     // --detach returning means "accepting commands", which is not quite the same
     // as "the TCP listeners are bound". Poll for the thing the SDK actually
@@ -225,6 +292,11 @@ class Daemon {
   stop() {
     if (!this.started) return;
     this.started = false;
+
+    // The clean path first, even though it is expected to answer NO_DAEMON
+    // under a tcp-only config: if the config is ever changed back to include a
+    // local endpoint, this is the right way to stop it, and it costs one
+    // detached process either way.
     try {
       const child = spawn(this.binary, ['daemon', 'stop'], {
         env: this.env(),
@@ -233,7 +305,19 @@ class Daemon {
       });
       child.unref();
     } catch {
-      // Going away regardless.
+      // Fall through to the signal.
+    }
+
+    // And the one that actually works here. SIGTERM, not SIGKILL: the daemon
+    // owns logos_host children and a module store, and should be given the
+    // chance to bring them down rather than orphaning them.
+    if (this.pid) {
+      try {
+        process.kill(this.pid, 'SIGTERM');
+      } catch {
+        // Already gone, which is the desired end state anyway.
+      }
+      this.pid = null;
     }
   }
 }

@@ -226,6 +226,124 @@ if (fs.existsSync(modulesDir)) {
   console.log(`bundled modules/ (${patched} shared objects patched)`);
 }
 
+// --- logosctl, the 0.2.0 daemon ---------------------------------------------
+//
+// NOT a simple copy, despite appearances. `logosctl/bin/logosctl` is a Nix
+// binary WRAPPER: a tiny ELF that sets QT_PLUGIN_PATH and LOGOS_HOST_PATH to
+// absolute /nix/store paths and then execs `.logosctl-wrapped`, which is
+// dynamically linked against the whole Qt closure. Copying only the visible
+// binary produces something that either cannot start or silently reaches into a
+// store that will not exist on a user's machine.
+//
+// So the wrapped binary is what gets bundled, under the wrapper's name, and the
+// environment the wrapper used to set is supplied by src/daemon.js instead.
+// Its sibling lib/, modules/ and modules-pkg/ trees come along because the
+// daemon resolves its built-in modules (capability_module, modules_state,
+// package_manager, package_downloader) relative to its own location.
+const logosctlLink = path.join(projectRoot, 'logosctl', 'bin', 'logosctl');
+if (fs.existsSync(logosctlLink)) {
+  const logosctlRoot = path.dirname(path.dirname(fs.realpathSync(logosctlLink)));
+  const destRoot = path.join(outDir, 'logosctl');
+  const wrapped = path.join(logosctlRoot, 'bin', '.logosctl-wrapped');
+  const realBinary = fs.existsSync(wrapped) ? wrapped : fs.realpathSync(logosctlLink);
+
+  fs.mkdirSync(path.join(destRoot, 'bin'), { recursive: true });
+  const destBinary = path.join(destRoot, 'bin', 'logosctl');
+  copyFile(realBinary, destBinary);
+
+  // Its own lib/ first, then the shared runtime lib/ — the daemon's private
+  // libraries (liblogos_core, liblgx, libpackage_manager_lib) shadow nothing,
+  // but its Qt closure is the same one already bundled, so it is not copied
+  // twice.
+  setRunpath(destBinary, '$ORIGIN/../lib:$ORIGIN/../../lib');
+
+  // The daemon's own trees, and the libraries they need.
+  const daemonEntryPoints = [realBinary];
+  for (const sub of ['lib', 'modules', 'modules-pkg']) {
+    const from = path.join(logosctlRoot, sub);
+    if (!fs.existsSync(from)) continue;
+    const to = path.join(destRoot, sub);
+    copyDirectory(from, to);
+    const patchDaemonTree = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          patchDaemonTree(full);
+        } else if (/\.so(\.\d+)*$/.test(entry.name)) {
+          daemonEntryPoints.push(full);
+          const toShared = path.relative(path.dirname(full), path.join(outDir, 'lib'));
+          const toOwn = path.relative(path.dirname(full), path.join(destRoot, 'lib'));
+          setRunpath(full, `$ORIGIN:$ORIGIN/${toOwn}:$ORIGIN/${toShared}`);
+        }
+      }
+    };
+    patchDaemonTree(to);
+  }
+
+  // Anything the daemon needs that the app's own closure did not already pull
+  // in — yaml-cpp and libproxy are the ones that show up here.
+  let added = 0;
+  for (const [name, src] of collectClosure(daemonEntryPoints)) {
+    const dest = path.join(outDir, 'lib', name);
+    if (fs.existsSync(dest)) continue;
+    copyFile(src, dest);
+    setRunpath(dest, '$ORIGIN');
+    added += 1;
+  }
+  console.log(`bundled logosctl/ (+${added} libraries for the daemon)`);
+
+  // QT PLUGINS, which the wrapper used to point at and nothing else supplies.
+  //
+  // The daemon opens TLS connections (package catalogs) and resolves hosts, and
+  // Qt loads those backends as PLUGINS — dlopened by path, so they are invisible
+  // to the ldd walk above and get missed by a NEEDED-closure bundler. Without
+  // them the daemon starts and then fails at the first network operation.
+  const qtPluginSource = (() => {
+    for (const lib of collectClosure(daemonEntryPoints).values()) {
+      const match = lib.match(/^(\/nix\/store\/[^/]*qtbase[^/]*)\//);
+      if (match) return path.join(match[1], 'lib', 'qt-6', 'plugins');
+    }
+    return null;
+  })();
+  if (qtPluginSource && fs.existsSync(qtPluginSource)) {
+    const destPlugins = path.join(outDir, 'qt-plugins');
+    let copied = 0;
+    for (const group of ['tls', 'networkinformation', 'platforms']) {
+      const from = path.join(qtPluginSource, group);
+      if (!fs.existsSync(from)) continue;
+      const to = path.join(destPlugins, group);
+      copyDirectory(from, to);
+      for (const entry of fs.readdirSync(to)) {
+        if (!/\.so$/.test(entry)) continue;
+        const toLib = path.relative(to, path.join(outDir, 'lib'));
+        setRunpath(path.join(to, entry), `$ORIGIN:$ORIGIN/${toLib}`);
+        copied += 1;
+      }
+    }
+    console.log(`bundled qt-plugins/ (${copied} plugins: tls, networkinformation, platforms)`);
+  } else {
+    console.warn('  ! no qtbase in the daemon closure; Qt plugins not bundled');
+  }
+}
+
+// The .lgx packages the daemon installs into its own store at first run.
+//
+// The daemon does not share the app's ./modules tree — it keeps its own store
+// under its session directory and populates it with `package install`. So the
+// packages themselves have to ship, not just the unpacked modules.
+const PACKAGE_DIRS = ['lez-core-lgx', 'lez-rln-lgx', 'rln-lgx', 'delivery-lgx'];
+let packaged = 0;
+for (const name of PACKAGE_DIRS) {
+  const from = path.join(projectRoot, name);
+  if (!fs.existsSync(from)) continue;
+  for (const entry of fs.readdirSync(from)) {
+    if (!entry.endsWith('.lgx')) continue;
+    copyFile(path.join(from, entry), path.join(outDir, 'packages', name, entry));
+    packaged += 1;
+  }
+}
+if (packaged > 0) console.log(`bundled packages/ (${packaged} .lgx)`);
+
 // THE ADDON IS PATCHED IN PLACE, not copied into the bundle.
 //
 // electron-builder packages build/Release/logos_addon.node into

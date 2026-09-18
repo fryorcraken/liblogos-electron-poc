@@ -28,8 +28,25 @@
       #status[data-state='working'] { color: #b7791f; }
       #status[data-state='ok']      { color: #217a3c; }
       #status[data-state='error']   { color: #c0392b; }
-      button { padding: 9px 18px; font: inherit; font-weight: 600; align-self: flex-start; }
+      .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+      button { padding: 9px 18px; font: inherit; font-weight: 600; }
       button:disabled { opacity: 0.5; }
+      button.secondary { font-weight: 400; opacity: 0.85; }
+      /* The live half: connection state and a running event count, so the pane
+         is not the only evidence that something is still happening. */
+      #conn {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+      #conn .label { color: GrayText; }
+      #conn .label:not(:first-child) { margin-left: 12px; }
+      #connState { font-weight: 600; }
+      #connState[data-state='Connected'] { color: #217a3c; }
+      #connState[data-state='PartiallyConnected'] { color: #b7791f; }
+      #connState[data-state='Disconnected'] { color: #c0392b; }
       pre {
         flex: 1;
         background: color-mix(in srgb, Canvas 92%, CanvasText);
@@ -51,16 +68,27 @@
     <div>
       <h1>liblogos · Electron PoC</h1>
       <p class="sub">
-        Loads the Logos <code>delivery</code> module and its dependency chain
-        through <code>liblogos_core</code>'s C ABI, from a native addon in
-        Electron's main process. Packaging PoC: the module's own API is not
-        driven, so no peers are connected.
+        Runs a <code>logosctl</code> daemon beside the app and drives the Logos
+        <code>delivery</code> module through its <code>core_service</code>
+        gateway — <code>createNode()</code>, <code>start()</code>, and a live
+        event stream. The gateway is what lets the Qt-free JS SDK call a module;
+        see <code>NEXT.md</code>.
       </p>
     </div>
 
     <div id="status" data-state="idle">Ready.</div>
 
-    <button id="start">Start delivery module</button>
+    <div class="row">
+      <button id="start">Start Waku node</button>
+      <button id="load" class="secondary">Load module only (0.1.0)</button>
+    </div>
+
+    <div id="conn" hidden>
+      <span class="label">connection</span>
+      <span id="connState">—</span>
+      <span class="label">events</span>
+      <span id="eventCount">0</span>
+    </div>
 
     <pre id="log"></pre>
 

@@ -5,7 +5,11 @@
 const els = {
   status: document.getElementById('status'),
   start: document.getElementById('start'),
+  load: document.getElementById('load'),
   log: document.getElementById('log'),
+  conn: document.getElementById('conn'),
+  connState: document.getElementById('connState'),
+  eventCount: document.getElementById('eventCount'),
 };
 
 function setStatus(text, state) {
@@ -47,8 +51,48 @@ function log(message, isError = false) {
   appendLine(line);
 }
 
+// THE 0.2.0 BUTTON: daemon up, module loaded in it, real Waku node started.
 els.start.addEventListener('click', async () => {
   els.start.disabled = true;
+  els.load.disabled = true;
+  els.conn.hidden = false;
+  // Minutes, not seconds, on a cold run: the daemon installs four packages into
+  // its store before it can load anything. Say so rather than looking hung.
+  setStatus('Starting daemon and bringing a node up…', 'working');
+  log('Starting the logosctl daemon…');
+
+  try {
+    const result = await window.logos.startNode();
+    setStatus('Waku node running — watching for events', 'ok');
+    log(`Daemon modules: ${result.modules.join(', ')}`);
+    log(`Subscribed to: ${result.watched.join(', ')}`);
+    log('The node is up. Connection events arrive as peers come and go.');
+  } catch (err) {
+    setStatus('Failed to start the node', 'error');
+    log(err.message, true);
+    els.start.disabled = false;
+    els.load.disabled = false;
+  }
+});
+
+// The module's own events, as forwarded by the daemon. connectionStateChanged
+// carries [status, timestamp] — the status is what the header shows.
+let eventCount = 0;
+window.logos.onEvent(({ event, data }) => {
+  eventCount += 1;
+  els.eventCount.textContent = String(eventCount);
+  if (event === 'connectionStateChanged' && data.length > 0) {
+    els.connState.textContent = String(data[0]);
+    els.connState.dataset.state = String(data[0]);
+  }
+});
+
+// The 0.1.0 path, kept: load the module through the addon's C ABI in THIS
+// process. It proves the packaging, and cannot call the module — which is the
+// gap the button above closes.
+els.load.addEventListener('click', async () => {
+  els.start.disabled = true;
+  els.load.disabled = true;
   // Bringing up delivery means starting Waku — seconds, not milliseconds, and
   // it blocks the main process throughout (see addon.cc). Say so, because the
   // window is genuinely frozen until it returns.
@@ -74,11 +118,13 @@ els.start.addEventListener('click', async () => {
       setStatus('delivery failed to load', 'error');
       log('core refused the load — see the terminal for its log', true);
       els.start.disabled = false;
+      els.load.disabled = false;
     }
   } catch (err) {
     setStatus('Failed', 'error');
     log(err.message, true);
     els.start.disabled = false;
+    els.load.disabled = false;
   }
 });
 
@@ -92,13 +138,15 @@ window.logos.onLog((line) => {
   appendLine(el);
 });
 
-// Surface a broken addon immediately rather than on first click.
+// Surface a broken addon immediately rather than on first click. Only the
+// 0.1.0 button is disabled by this: the gateway route goes through the daemon,
+// a separate process, and does not touch the addon at all.
 window.logos.status().then((status) => {
   if (status.addonLoaded) {
     log('Native addon loaded.');
   } else {
-    setStatus('Native addon failed to load', 'error');
-    log(status.error, true);
-    els.start.disabled = true;
+    log(`Native addon unavailable: ${status.error}`, true);
+    log('The daemon route does not need it; "Load module only" does.');
+    els.load.disabled = true;
   }
 });

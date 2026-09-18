@@ -11,6 +11,8 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const { app, BrowserWindow, ipcMain } = require('electron');
+const { Daemon } = require('./daemon.js');
+const { Gateway } = require('./gateway.js');
 
 // As installed by lgpm and named in the module's manifest.json. It declares
 // liblogos_rln_module as a required dependency, which LOAD_REQUIRED_DEPS (the
@@ -30,12 +32,27 @@ function runtimePaths() {
     return {
       modulesDir: path.join(root, 'modules'),
       hostPath: path.join(root, 'bin', 'logos_host'),
+      // The gateway route's own pieces: the daemon binary, the .lgx packages it
+      // installs into its store, and the protocol library koffi dlopens.
+      logosctl: path.join(root, 'logosctl', 'bin', 'logosctl'),
+      packageDir: path.join(root, 'packages'),
+      protocolLib: path.join(root, 'lib', 'liblogos_protocol.so'),
+      // Packaged only: the bundled daemon is the unwrapped binary, so the app
+      // supplies the Qt plugin path its Nix wrapper used to set.
+      qtPluginPath: path.join(root, 'qt-plugins'),
     };
   }
   const root = path.join(__dirname, '..');
   return {
     modulesDir: path.join(root, 'modules'),
     hostPath: path.join(root, 'liblogos', 'bin', 'logos_host'),
+    logosctl: path.join(root, 'logosctl', 'bin', 'logosctl'),
+    // In a checkout the .lgx directories sit at the top level (delivery-lgx and
+    // friends), which is what `make modules` installs from.
+    packageDir: root,
+    protocolLib: path.join(root, 'liblogos', 'lib', 'liblogos_protocol.so'),
+    // In a checkout logosctl is still the Nix wrapper, which sets this itself.
+    qtPluginPath: null,
   };
 }
 
@@ -166,6 +183,94 @@ handle('logos:startDelivery', () => {
   return { ok, elapsedMs, log, loaded: core.loadedModules() };
 });
 
+// THE 0.2.0 PATH: a daemon beside the app, and the module driven through its
+// core_service gateway.
+//
+// This is deliberately NOT the addon. The addon (logos:startDelivery above)
+// loads the module into THIS process and cannot call it; the daemon loads its
+// own copy into its own process and can. Running both would bring the module up
+// twice for no benefit, so the button drives this one and the addon stays as
+// what 0.1.0 proved — see the README.
+let daemon = null;
+let gateway = null;
+// The in-flight start, so a second caller joins it instead of starting a
+// SECOND daemon. That is not a theoretical tidiness concern: `daemon start`
+// stops the previous daemon and the new one REWRITES auto.json, so the first
+// caller is left holding a rotated token — and a stale token does not error,
+// it hangs forever. Observed exactly once, as a 60s timeout on getStatus, when
+// a headless run and a button click overlapped.
+let startInFlight = null;
+
+handle('logos:startNode', () => {
+  if (gateway) return Promise.resolve({ alreadyRunning: true });
+  if (!startInFlight) {
+    startInFlight = startNode().finally(() => {
+      startInFlight = null;
+    });
+  }
+  return startInFlight;
+});
+
+async function startNode() {
+  const { logosctl, packageDir, protocolLib, qtPluginPath } = runtimePaths();
+  if (!fs.existsSync(logosctl)) {
+    throw new Error(`logosctl not found at ${logosctl}`);
+  }
+  // The daemon spawns logos_host per module exactly as core does, and finds it
+  // the same way. Without this it comes up and every module load fails.
+  configureEnvironment();
+
+  // Its own session directory under userData: this must not collide with a
+  // logosctl the user runs by hand, and it should disappear with the app.
+  daemon = new Daemon({
+    binary: logosctl,
+    configDir: path.join(app.getPath('userData'), 'logosctl'),
+    packageDir,
+    qtPluginPath,
+    log: broadcastLog,
+  });
+
+  const { corePort, capPort } = await daemon.start(MODULE_NAME);
+
+  // AFTER the daemon booted, never cached from earlier: auto.json is rewritten
+  // on every boot and a stale token hangs rather than failing.
+  const token = daemon.token();
+  if (!token) broadcastLog('no token in the daemon session — calls may hang');
+
+  // Assigned to the module-level `gateway` only once the whole sequence has
+  // succeeded. A half-built one left there would make the guard above report a
+  // running node and block the retry that would actually fix it.
+  const pending = new Gateway({ corePort, capPort, token, protocolLib, log: broadcastLog });
+  let status;
+  try {
+    status = await pending.getStatus();
+  } catch (err) {
+    pending.destroy();
+    daemon.stop();
+    daemon = null;
+    throw err;
+  }
+  gateway = pending;
+
+  // Subscribe BEFORE starting the node: the daemon forwards only what it is
+  // already watching, and the first connectionStateChanged arrives during
+  // start(). Watching afterwards is how you miss it.
+  const watched = await gateway.watchEvents(MODULE_NAME, (event, data) => {
+    broadcastLog(`[event] ${event} ${JSON.stringify(data)}`);
+    for (const win of logSubscribers) {
+      if (!win.isDestroyed()) win.webContents.send('logos:event', { event, data });
+    }
+  });
+  broadcastLog(`watching: ${watched.join(', ') || 'nothing'}`);
+
+  await gateway.startNode(MODULE_NAME);
+
+  return {
+    modules: (status && status.modules ? status.modules : []).map((m) => m.name),
+    watched,
+  };
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 760,
@@ -231,7 +336,31 @@ app.whenReady().then(() => {
   return createWindow();
 });
 
+// THE DAEMON MUST NOT OUTLIVE THE APP. It is a detached child holding two TCP
+// ports and a loaded Waku node; leaving it behind means the next run's
+// `daemon start` refuses (one daemon per session dir) and the ports stay bound.
+//
+// will-quit, not window-all-closed: the latter does not fire when the app is
+// quit directly, and this has to run on every exit path.
+function shutdownGateway() {
+  if (gateway) {
+    try {
+      gateway.destroy();
+    } catch {
+      // Going away regardless.
+    }
+    gateway = null;
+  }
+  if (daemon) {
+    daemon.stop();
+    daemon = null;
+  }
+}
+
+app.on('will-quit', shutdownGateway);
+
 app.on('window-all-closed', () => {
+  shutdownGateway();
   // Bring the runtime down while the Qt application object is still alive.
   if (liblogos !== null) {
     try {
