@@ -187,8 +187,16 @@ nix build 'github:logos-co/logos-logoscore-cli#ctl' -o logosctl
 npm ci --ignore-scripts
 make modules           # lgpm install every .lgx into ./modules
 make appimage          # -> dist/liblogos-electron-poc-0.2.0-x86_64.AppImage
-make verify-appimage   # prove the packaged app starts delivery
+make verify-appimage   # prove the packaged app loads delivery (0.1.0)
+make verify-appimage-node  # prove the BUNDLED daemon works too (0.2.0)
 ```
+
+`verify-appimage` never touches `logosctl`, so it would pass just as happily
+with the daemon missing from the bundle or unable to find its Qt plugins —
+which is exactly the failure that packaging a Nix-wrapped binary invites.
+`verify-appimage-node` runs the bundled daemon out of the extracted AppImage
+with `LD_LIBRARY_PATH` and `QT_PLUGIN_PATH` unset, which is the same
+relocatability test the rest of the runtime already gets.
 
 Other targets: `make smoke` (plain Node), `make verify` (headless Electron,
 0.1.0), `make verify-node` (headless Electron, 0.2.0 — starts a real node),
@@ -347,9 +355,16 @@ Honestly accounted for, because 0.3.0 exists to remove all of it:
   `modules-pkg/` trees — it is a Nix wrapper script over a dynamically linked
   binary, not the statically linked one it appears to be.
 - **A daemon lifecycle the app has to manage**: start it, wait for the port,
-  read the token *after* it boots, and stop it on every exit path.
+  read the token *after* it boots, and stop it on every exit path — including
+  `app.exit()`, which does not fire `will-quit`. And `logosctl daemon stop`
+  cannot stop this daemon: the CLI dials the local endpoint that the tcp-only
+  config removes, so it reports `NO_DAEMON` while the daemon is running and
+  holding both ports. The app signals the pid instead. A leaked daemon is not
+  cosmetic — the next run cannot bind, and the orphan is invisible to the
+  obvious way of checking.
 
-0.3.0 replaces all three by calling modules from the addon directly.
+0.3.0 removes all three by calling modules from the addon directly, which
+`docs/0.3.0-inventory.md` establishes is possible and much smaller than this.
 
 ## CI
 

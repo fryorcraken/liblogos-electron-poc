@@ -61,7 +61,7 @@ LGX_DIRS = cap-lgx delivery-lgx rln-lgx lez-rln-lgx lez-core-lgx
 # built in, so installing the package over it is unnecessary.
 DAEMON_LGX_DIRS = lez-core-lgx lez-rln-lgx rln-lgx delivery-lgx
 
-.PHONY: build build-electron smoke verify verify-node run bundle appimage modules probe-transport probe-sdk probe-core-service probe-node exp-provider exp-provider-electron exp-node exp-electron exp-call exp-call-electron clean
+.PHONY: build build-electron smoke verify verify-node verify-appimage-node run bundle appimage modules probe-transport probe-sdk probe-core-service probe-node exp-provider exp-provider-electron exp-node exp-electron exp-call exp-call-electron clean
 
 build:
 	$(SHELL_RUN) env LOGOS_LIBLOGOS_ROOT=$(LOGOS_LIBLOGOS_ROOT) npx node-gyp rebuild
@@ -164,6 +164,13 @@ probe-node:
 verify-node: build-electron
 	$(SHELL_RUN) env ELECTRON_DISABLE_SANDBOX=1 MODULE=$(MODULE) \
 		npx electron scripts/electron-node-smoke.js
+
+# Does the DAEMON survive packaging? `verify-appimage` never touches logosctl,
+# so it would pass with the daemon missing entirely. This runs the BUNDLED one
+# out of the extracted AppImage with LD_LIBRARY_PATH and QT_PLUGIN_PATH unset —
+# the same relocatability test the rest of the runtime already gets.
+verify-appimage-node:
+	bash scripts/verify-appimage-node.sh
 
 # --- 0.3.0 research: can the addon HOST core_service in-process? -------------
 #
