@@ -594,9 +594,18 @@ dispatcher does not exist there, and on macOS both Chromium and Qt want
 the headless verification, builds the AppImage, and uploads it as an artifact.
 Pushing a `v*` tag additionally publishes it as a release asset.
 
-**It does not yet build `logosctl`.** `bundle-runtime.js` skips the daemon when
-`./logosctl` is absent rather than failing, so CI still produces a working
-0.1.0-equivalent AppImage — but one whose "Start Waku node" button reports
-`logosctl not found`. Adding `nix build 'github:logos-co/logos-logoscore-cli#ctl'
--o logosctl` to the workflow is what would close that, and `make verify-node` is
-the check for whether it worked.
+It builds `logosctl` too, and verifies the daemon that ends up inside the
+AppImage separately from the addon — `bundle-runtime.js` *skips* the daemon when
+`./logosctl` is absent rather than failing, so without that check CI would
+happily publish an image whose 0.1.0 path worked and whose 0.2.0 button reported
+`logosctl not found`.
+
+## Licence
+
+Dual MIT / Apache-2.0, at your option.
+
+---
+
+This is an independent proof of concept. It is not built for, on behalf of, or
+as part of the work of Logos or the Institute of Free Technology, and has not
+been reviewed, audited, approved or endorsed by either.
