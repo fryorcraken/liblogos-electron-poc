@@ -17,11 +17,18 @@ has to **ship as a single file** that runs on a machine with no Nix.
 
 ## Result
 
-**Both work, and the module now actually runs.**
+**All three work.** The app has a button for each, and each proves something
+different:
 
-0.1.0 proved the packaging: the module and its whole dependency chain load
-inside a shipped app. 0.2.0 closes the gap it left — the app drives the module's
-own API, so a real Waku node starts and stays connected.
+| | What it proves |
+| --- | --- |
+| **Load only** (0.1.0) | The module and its whole dependency chain load inside a shipped app, on a machine with no Nix. It cannot call the module. |
+| **via logosctl** (0.2.0) | A daemon beside the app drives the module through its `core_service` gateway — the route a Qt-free consumer has to take. A real Waku node starts and reaches `Connected`. |
+| **in-process** (0.3.0) | The addon calls the module itself. Same node, no daemon, no gateway, no transport, no token — but it needs Qt C++. |
+
+If you only read one thing, read
+[What has to be FFI-wrapped](#what-has-to-be-ffi-wrapped-and-what-is-only-glue):
+the three routes exist to show that **only the last one requires C++**.
 
 ```
 $ make verify-appimage        # the packaged AppImage, outside any dev shell
@@ -64,12 +71,38 @@ start() — bringing the Waku node up
 PASS: a Waku node is running and delivery_module is emitting
 ```
 
+And 0.3.0, which reaches the same place with no daemon at all — the addon
+calling the module itself (see [In-process](#in-process-030)):
+
+```
+$ make verify-inproc          # the shipped addon, inside Electron
+
+watchModule(delivery_module, *) -> id=1
+createNode({"mode":"Core","preset":"logos.test"}) -> success:true
+start() -> success:true
+
+EVENT connectionStateChanged: ["PartiallyConnected",...]
+EVENT nodeStarted: [true,"",...]
+EVENT connectionStateChanged: ["Connected",...]
+renderer executeJavaScript(1+1) -> 2
+
+PASS: a Waku node started in-process inside Electron, Chromium responsive
+```
+
+That last line before the PASS is the point of the check: it executes JavaScript
+in the renderer *after* the node is up, so a node that ran by wedging the UI
+would fail it.
+
 - **Qt and Chromium coexist in-process.** No symbol collision, no event-loop
-  deadlock, no helper process needed.
-- **The AppImage is self-contained**, 366 MB, and brings up the real delivery
-  module with its Waku/RLN dependency chain.
-- **A Waku node actually runs.** `createNode()` and `start()` both return
-  success, and the node reaches `Connected` against the `logos.test` network.
+  deadlock, no helper process needed — and with Qt's loop pumped alongside
+  Chromium's, which 0.1.0 never had to do.
+- **The AppImage is self-contained**, 427 MB with the daemon bundled, and brings
+  up the real delivery module with its Waku/RLN dependency chain.
+- **A Waku node actually runs**, by two independent routes. `createNode()` and
+  `start()` both return success, and the node reaches `Connected` against the
+  `logos.test` network.
+- **In-process calling costs nothing in size.** Every library it links was
+  already bundled for the C ABI.
 
 ### What each release demonstrates
 
@@ -476,8 +509,68 @@ Honestly accounted for, because 0.3.0 exists to remove all of it:
   cosmetic — the next run cannot bind, and the orphan is invisible to the
   obvious way of checking.
 
-0.3.0 removes all three by calling modules from the addon directly, which
-`docs/0.3.0-inventory.md` establishes is possible and much smaller than this.
+0.3.0 removes all three by calling modules from the addon directly.
+
+## In-process (0.3.0)
+
+The addon calls `delivery_module` itself: `getClient()` then
+`invokeRemoteMethod()`, over the **default LocalSocket/QtRO transport that every
+module already publishes on and uses to talk to its peers**. No daemon, no
+gateway, no TCP port, no token.
+
+```js
+await core.callModule('delivery_module', 'createNode', [NODE_CONFIG]);
+await core.callModule('delivery_module', 'start', []);
+core.watchModule('delivery_module', '', onEvent);   // '' = every event
+```
+
+`make verify-inproc` is the check. `make exp-call` is the smaller experiment it
+grew out of, and the one to re-run first if this ever stops working.
+
+### Why this works when the JS SDK could not
+
+The plain-transport limitation that forced 0.2.0's daemon applies to **Qt-free**
+consumers. The addon is not one: it is a Qt participant in the same process,
+speaking the transport the modules already use. That is the entire difference,
+and it took a long time to see because the failure mode of the other route —
+calls hanging rather than erroring — looks identical to a dozen other problems.
+
+### What it needs, and what it costs
+
+**~190 lines of Qt C++** in `src/addon.cc`, listed by line in
+[the FFI section](#what-has-to-be-ffi-wrapped-and-what-is-only-glue). Four
+pieces, each non-obvious:
+
+- **`callModule` is a `Napi::AsyncWorker`** ([`addon.cc:264`](src/addon.cc#L264)).
+  Not polish: `invokeRemoteMethod` blocks with a 20 s default timeout, and doing
+  that on Electron's main thread freezes the window for the duration.
+- **Qt's event loop must be pumped** ([`addon.cc:232`](src/addon.cc#L232),
+  driven from [`index.js`](src/index.js)). A QtRO round trip only completes when
+  the loop is serviced, and an unpumped `callModule` does not error — it waits
+  out the full timeout. Inside Electron it happens to work unpumped, because
+  Qt's glib dispatcher attaches to the `GMainContext` Chromium drives, but
+  `QT_NO_GLIB=1` flips that to a hang. The pump is explicit so correctness does
+  not rest on the coincidence.
+- **A dedicated Qt thread does not work.** Socket notifiers stay affined to the
+  thread that created them, so a `QEventLoop::exec()` on its own thread never
+  services them. This README used to recommend exactly that.
+- **Events subscribe with the wildcard** (`''`). A subscription *arms* on event
+  names the module never emits, so "armed but silent" is indistinguishable from
+  a typo — and the module only wires its event callback on `createNode`'s
+  success path, so subscribing has to come first and still see nothing until
+  then.
+
+**Zero AppImage cost**: `liblogos_qt_host` and `liblogos_protocol` were already
+bundled for the C ABI.
+
+**The real trade** is the ABI. 0.1.0 bound only the C ABI, which was deliberate
+insulation; this links the C++ host runtime, whose header carries a private-
+layout warning. A liblogos bump can now break the addon at load time rather than
+at compile time. `docs/0.3.0-inventory.md` §5.9 records that, along with what is
+still untested: nothing has run longer than ~60 s, the 5 ms pump interval is
+uncharacterised, and macOS and Windows are entirely unknown — the glib
+dispatcher does not exist there, and on macOS both Chromium and Qt want
+`NSApplication`'s run loop.
 
 ## CI
 
