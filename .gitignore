@@ -14,3 +14,4 @@ runtime-bundle/
 
 # lgpm-installed modules
 /modules
+.claude/worktrees/
