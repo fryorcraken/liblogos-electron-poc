@@ -61,7 +61,7 @@ LGX_DIRS = cap-lgx delivery-lgx rln-lgx lez-rln-lgx lez-core-lgx
 # built in, so installing the package over it is unnecessary.
 DAEMON_LGX_DIRS = lez-core-lgx lez-rln-lgx rln-lgx delivery-lgx
 
-.PHONY: build build-electron smoke verify verify-node run bundle appimage modules probe-transport probe-sdk probe-core-service probe-node probe-inproc exp-provider exp-provider-electron exp-node exp-electron exp-call exp-call-electron exp-event clean
+.PHONY: build build-electron smoke verify verify-node verify-inproc run bundle appimage modules probe-transport probe-sdk probe-core-service probe-node probe-inproc exp-provider exp-provider-electron exp-node exp-electron exp-call exp-call-electron exp-event clean
 
 build:
 	$(SHELL_RUN) env LOGOS_LIBLOGOS_ROOT=$(LOGOS_LIBLOGOS_ROOT) npx node-gyp rebuild
@@ -164,6 +164,18 @@ probe-node:
 verify-node: build-electron
 	$(SHELL_RUN) env ELECTRON_DISABLE_SANDBOX=1 MODULE=$(MODULE) \
 		npx electron scripts/electron-node-smoke.js
+
+# The 0.3.0 counterpart of `verify`, and a genuinely different question.
+#
+# `verify` proves the addon can LOAD a module inside Electron — which 0.1.0
+# managed without Qt's event loop ever running. This proves it can CALL one and
+# receive its events, which needs that loop pumped in the same process Chromium
+# is driving, and it checks Chromium is still answering afterwards by executing
+# JS in the renderer. A node that ran by wedging the UI would pass every other
+# assertion.
+verify-inproc: build-electron
+	$(SHELL_RUN) env ELECTRON_DISABLE_SANDBOX=1 MODULE=$(MODULE) \
+		npx electron scripts/electron-inproc-smoke.js
 
 # 0.3.0, headless: the SHIPPED addon starting a real Waku node in-process, with
 # no daemon beside it. The counterpart of probe-node for the 0.2.0 route.

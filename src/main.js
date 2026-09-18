@@ -17,6 +17,27 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 // default in index.js) resolves and loads first.
 const MODULE_NAME = 'delivery_module';
 
+// THE NODE CONFIG, and why this one.
+//
+// createNode takes a flat JSON object of WakuNodeConf fields, not a config name
+// — passing a name answers "createNode cfg is not valid JSON". Unknown keys are
+// ignored and every field has a default, so "{}" is accepted; it is the wrong
+// choice, because with no entry nodes there is nobody to dial and the node sits
+// silent. That is the "log goes quiet after bring-up" problem this release
+// exists to fix, wearing a different hat.
+//
+// A `preset` populates cluster id, entry nodes and sharding together, and its
+// bootstrap nodes are where the connection traffic comes from. Valid names are
+// "", "twn", "logos.dev", "logos.test" and "status.prod". "twn" is the
+// RLN-protected Waku Network and would additionally need a registered
+// membership, which this PoC does not have.
+//
+// Only mode/preset at the top level, deliberately: any OTHER bare top-level key
+// (logLevel is the easy one to reach for) silently selects the backend's legacy
+// flat WakuNodeConf shape instead of this one. Both parse; they are different
+// code paths.
+const NODE_CONFIG = JSON.stringify({ mode: 'Core', preset: 'logos.test' });
+
 // WHERE THE RUNTIME LIVES, which differs between a checkout and a packaged app.
 //
 //   packaged   resources/runtime/{modules,lib,bin} inside the AppImage
@@ -85,6 +106,16 @@ function broadcastLog(text) {
   }
 }
 
+// Module events, on their own channel rather than folded into the log stream.
+// They are structured — a name and a payload — and the renderer marks them
+// differently, because "the node told us something" and "spdlog wrote a line"
+// are not the same kind of evidence.
+function broadcastModuleEvent(event, args) {
+  for (const win of logSubscribers) {
+    if (!win.isDestroyed()) win.webContents.send('logos:moduleEvent', { event, args });
+  }
+}
+
 // Starts the addon's fd-level capture and pumps what it reads to the renderer.
 // The redirect itself lives in C++ (see captureOutput in addon.cc) because
 // spdlog writes to the file descriptor, never through Node.
@@ -132,12 +163,12 @@ handle('logos:status', () => {
   }
 });
 
-// The whole demo in one call: bring up core, load delivery, report.
+// Bring up core and load delivery.
 //
-// NOTE: this blocks the main process for the entire bring-up — see the
-// threading comment in addon.cc. For delivery that means starting Waku, so the
-// window is unresponsive for seconds. Deliberate: a PoC that hid this behind a
-// worker thread would be demonstrating the worker, not the binding.
+// NOTE: loadModule blocks the main process for the whole bring-up — see the
+// threading comment in addon.cc. Deliberate: a PoC that hid this behind a worker
+// thread would be demonstrating the worker, not the binding. The node start
+// below is the part that had to stop blocking, and it does.
 handle('logos:startDelivery', () => {
   const core = getRuntime();
   const { modulesDir } = runtimePaths();
@@ -164,6 +195,60 @@ handle('logos:startDelivery', () => {
   log.push(`loadModule(${MODULE_NAME}) -> ${ok} in ${elapsedMs} ms`);
 
   return { ok, elapsedMs, log, loaded: core.loadedModules() };
+});
+
+// THE 0.3.0 PAYOFF: a real Waku node, started from the Electron app, with no
+// daemon beside it and no gateway in between.
+//
+// 0.2.0 reached this point by spawning a logosctl daemon and talking to its
+// core_service over loopback TCP. This calls the module directly over the
+// default LocalSocket/QtRO transport that every module already publishes on —
+// which the addon can speak because it is a Qt participant in the same process,
+// and which the JS SDK could not, because it is not.
+let nodeStarted = false;
+
+handle('logos:startNode', async () => {
+  const core = getRuntime();
+  if (nodeStarted) throw new Error('the node is already running');
+
+  const log = [];
+  const say = (line) => {
+    log.push(line);
+    broadcastLog(line);
+  };
+
+  // SUBSCRIBE FIRST, and with the wildcard.
+  //
+  // Before createNode because the module wires its own event callback only on
+  // createNode's success path, so a subscription taken afterwards can miss the
+  // first connectionStateChanged. The empty event name means every event on the
+  // module: it is what this log pane wants, and it is the only spelling that
+  // cannot be silently wrong, since a subscription arms happily on names the
+  // module never emits.
+  const subscriptionId = core.watchModule(MODULE_NAME, '', broadcastModuleEvent);
+  say(`watchModule(${MODULE_NAME}, *) -> id=${subscriptionId}`);
+  if (subscriptionId === 0) throw new Error('the event subscription was refused');
+
+  // createNode then start, the module's documented order (createNode exactly
+  // once per context; start before any message operation). Both are awaited
+  // rather than blocking: invokeRemoteMethod has a 20s default timeout and this
+  // is the main process.
+  say(`createNode(${NODE_CONFIG})`);
+  const created = await core.callModule(MODULE_NAME, 'createNode', [NODE_CONFIG]);
+  say(`  -> ${JSON.stringify(created)}`);
+  if (created && created.success === false) {
+    throw new Error(`createNode refused: ${created.error || 'no reason given'}`);
+  }
+
+  say('start() — bringing the Waku node up');
+  const started = await core.callModule(MODULE_NAME, 'start', []);
+  say(`  -> ${JSON.stringify(started)}`);
+  if (started && started.success === false) {
+    throw new Error(`start refused: ${started.error || 'no reason given'}`);
+  }
+
+  nodeStarted = true;
+  return { ok: true, subscriptionId };
 });
 
 function createWindow() {

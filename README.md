@@ -47,19 +47,22 @@ modules entirely through its own bundled, `$ORIGIN`-relative libraries.
 ### What "loaded" does and does not mean
 
 `logos_core.h` defines a loaded module as one whose **plugin has loaded in its
-host process** — not one that is doing any work. That is exactly what this PoC
-shows, and it is worth being precise about the gap:
+host process** — not one that is doing any work. Keeping that distinction sharp
+is why the UI has two buttons rather than one:
 
-| Demonstrated | Not demonstrated |
+| after "Start delivery module" | after "Start Waku node" |
 | --- | --- |
-| The plugin loads; `DeliveryModuleImpl` constructs | No Waku node is started |
-| The dependency graph resolves and loads in order | No peers, no connections, no messages |
-| Each module publishes its API on a transport | No module method is ever called |
-| RLN creates and unlocks a keystore | No membership is registered |
+| The plugin loads and constructs | `createNode()` builds a Waku context |
+| The dependency graph resolves in order | `start()` brings the node up |
+| Each module publishes its API on a transport | Peers are dialed; `connectionStateChanged` arrives |
+| RLN creates and unlocks a keystore | Still no membership registered |
 
-**No delivery API call is made.** This addon binds only the lifecycle functions
-in `logos_core.h`; calling into a module is a separate interface. The module's
-own surface is substantial and entirely untouched here:
+**0.3.0 calls the module.** `callModule` and `watchModule` in `src/addon.cc`
+reach it in-process over the default LocalSocket/QtRO transport — no daemon, no
+gateway, no TCP port, no token. `make verify-inproc` is the check, and it also
+proves Chromium is still responsive afterwards.
+
+The module's own surface, for reference:
 
 ```
 createNode(QString)              getAvailableConfigs()    getNodeInfo(QString)
@@ -83,13 +86,19 @@ and `connectionStateChanged(QString,int)`, which was wrong on both counts.
 than the plugin's own mapping. Subscribing with an empty event name (the
 wildcard) is therefore the only way to be sure of seeing everything.
 
-`createNode()` is what would actually start the Waku node. Because none of this
-is called, the module loads and then sits idle — which is also why the log stops
-after bring-up rather than showing continuous activity.
+`createNode()` is what actually starts the Waku node, and 0.3.0 calls it —
+which is why the log no longer stops after bring-up. It takes a JSON *document*
+of `WakuNodeConf` fields, not a config name; a `preset` is what gives the node
+somebody to dial, where `{}` starts one that sits silent:
 
-Calling it was attempted; see [0.2.0](#next-actually-starting-a-node-020--attempted-blocked-upstream)
-below. It is reachable in metadata but not currently invocable from outside the
-process.
+```json
+{"mode": "Core", "preset": "logos.test"}
+```
+
+Reaching it from OUTSIDE the process is a different and still-unsolved problem —
+see [0.2.0](#next-actually-starting-a-node-020--attempted-blocked-upstream)
+below. In-process is what works, and the reason is that the addon is a Qt
+participant on the same bus the modules already use.
 
 Run with `LOGOS_LOG_LEVEL=debug` (the default here), the log does show each
 module coming up properly — publishing its surface and becoming reachable:

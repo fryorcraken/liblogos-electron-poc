@@ -5,6 +5,7 @@
 const els = {
   status: document.getElementById('status'),
   start: document.getElementById('start'),
+  startNode: document.getElementById('startNode'),
   log: document.getElementById('log'),
 };
 
@@ -65,11 +66,12 @@ els.start.addEventListener('click', async () => {
 
     if (result.ok) {
       // "loaded", not "running": core reports that the module's plugin loaded
-      // in its host process. Nothing here calls the module's own API, so no
-      // Waku node is started and no peers are connected. See the README.
+      // in its host process. No Waku node exists until "Start Waku node" calls
+      // createNode — which is now a button rather than a limitation.
       setStatus(`delivery module loaded (${result.elapsedMs} ms)`, 'ok');
       log(`Loaded modules: ${result.loaded.join(', ')}`);
-      log('Note: loaded means the plugin is up in its host process — no peers or traffic.');
+      log('Loaded means the plugin is up in its host process — no peers yet.');
+      els.startNode.disabled = false;
     } else {
       setStatus('delivery failed to load', 'error');
       log('core refused the load — see the terminal for its log', true);
@@ -82,6 +84,27 @@ els.start.addEventListener('click', async () => {
   }
 });
 
+// THE PAYOFF BUTTON: createNode() + start(), a real Waku node in this process.
+//
+// The window stays responsive throughout, which is the point of callModule
+// being an AsyncWorker — invokeRemoteMethod blocks with a 20s default timeout,
+// and doing that on the main thread would freeze the UI for the duration.
+els.startNode.addEventListener('click', async () => {
+  els.startNode.disabled = true;
+  setStatus('Starting Waku node…', 'working');
+  log('createNode() then start()…');
+
+  try {
+    await window.logos.startNode();
+    setStatus('Waku node running', 'ok');
+    log('Node started. Connection events follow as peers come and go.');
+  } catch (err) {
+    setStatus('Node failed to start', 'error');
+    log(err.message, true);
+    els.startNode.disabled = false;
+  }
+});
+
 // Core's own log, streamed from the native side. These are the module's real
 // messages — spdlog output from core and from each module host — not this
 // renderer's commentary, so they are marked to tell them apart.
@@ -89,6 +112,16 @@ window.logos.onLog((line) => {
   const el = document.createElement('div');
   el.className = 'native';
   el.textContent = line;
+  appendLine(el);
+});
+
+// MODULE EVENTS: the node itself, not a log line about it. These are what the
+// log pane was missing — connectionStateChanged as peers come and go is the
+// continuous activity that makes a running node visible.
+window.logos.onModuleEvent((event, args) => {
+  const el = document.createElement('div');
+  el.className = 'event';
+  el.textContent = `[${new Date().toLocaleTimeString()}] ${event}: ${JSON.stringify(args)}`;
   appendLine(el);
 });
 
