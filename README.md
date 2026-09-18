@@ -281,6 +281,22 @@ Not FFI, but the part that actually took the longest — see
 anywhere: every `.so` names its dependencies by absolute `/nix/store` path, so a
 bundle that is merely copied resolves nothing.
 
+### Turning this into a production library
+
+Everything on this page describes an addon that works **in this app, on this
+machine, on Linux**. The gap between that and something another team could
+depend on is written up in
+[`docs/0.3.0-inventory.md` §7](docs/0.3.0-inventory.md#7-from-poc-to-a-production-reusable-ffi-library)
+— blocking items (macOS/Windows event loops, lifecycle and reentrancy, the C++
+ABI commitment, longevity), known-soft edges, packaging and prebuilds, and the
+API surface.
+
+Its §7.5 is the short version: **a C ABI for provider registration and
+invocation**, over the `callMethodStd` shape `logos_provider_interface.h`
+already defines, would remove most of the blocking items outright and turn the
+binding into an FFI script in any language rather than a compiled addon per
+platform per ABI.
+
 ### Summary for sizing the work
 
 - **~190 lines of Qt C++** is the irreducible part, and only because
