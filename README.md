@@ -128,6 +128,93 @@ reports `host provided no instance_persistence_path — keystore ops will fail`.
 The UI is one button. This is a packaging and embedding PoC, not a module
 browser.
 
+## What has to be FFI-wrapped, and what is only glue
+
+The question this PoC exists to answer, for anyone sizing the same work in
+another language. Every file and line below is in this repo and runs.
+
+### The dividing line
+
+Two of the three things an app needs are **plain C** and bind from any language.
+The third is **Qt C++** and does not.
+
+| What you need | Interface | Bindable without C++? |
+| --- | --- | --- |
+| Start the runtime, load modules | `logos_core_*` C ABI | **yes** — plain C |
+| Consume a module from another process | `lp_*` C ABI in `liblogos_protocol` | **yes** — [logos-js-sdk](https://github.com/logos-co/logos-js-sdk) binds it with koffi, no compiler |
+| **Call a module in-process** | `LogosAPI` / `LogosAPIClient`, C++ | **no** — both are `QObject`s with no C ABI |
+
+That third row is the whole finding. It is why this repo contains a compiled
+addon rather than a `koffi` script, and it is the one thing a Logos dev kit
+would have to change to make module-calling reachable from Rust, Go or Python.
+
+### 1. The FFI wrapper — `src/addon.cc` (629 lines)
+
+The only C++ in the project. Two distinct halves:
+
+**(a) The C ABI half — mechanical, would be identical in any language.** Each of
+these is a few lines forwarding to a `logos_core_*` call:
+
+| JS | C ABI | Line |
+| --- | --- | --- |
+| `init()` | `logos_core_init` | [`addon.cc:139`](src/addon.cc#L139) |
+| `addModulesDir()` | `logos_core_add_modules_dir` | [`:157`](src/addon.cc#L157) |
+| `setPersistenceBasePath()` | `logos_core_set_persistence_base_path` | [`:168`](src/addon.cc#L168) |
+| `start()` / `cleanup()` | `logos_core_start` / `_cleanup` | [`:193`](src/addon.cc#L193), [`:414`](src/addon.cc#L414) |
+| `loadModule()` | `logos_core_load_module` | [`:444`](src/addon.cc#L444) |
+| `knownModules()` / `loadedModules()` | `logos_core_get_*_modules` | [`:475`](src/addon.cc#L475), [`:481`](src/addon.cc#L481) |
+
+[`liblogos-rust-poc`](../liblogos-rust-poc) binds this same surface in Rust, so
+none of it is Node-specific.
+
+**(b) The Qt C++ half — the part that cannot be FFI'd:**
+
+| Piece | Why C++ is unavoidable | Line |
+| --- | --- | --- |
+| `QCoreApplication` construction | liblogos requires one before `start()`; no C API creates it | [`addon.cc:55`](src/addon.cc#L55) |
+| `callModule()` → `LogosAPIClient::invokeRemoteMethod` | `LogosAPIClient` is a `QObject`; this is the irreducible core | [`:264`](src/addon.cc#L264) (`CallModuleWorker`), [`:323`](src/addon.cc#L323) |
+| `watchModule()` → `onEventWhenAvailable` | Qt signal delivery into a `ThreadSafeFunction` | [`:364`](src/addon.cc#L364) |
+| Qt event-loop pump | `processEvents()` — without it `callModule` silently waits out its 20 s timeout | [`:232`](src/addon.cc#L232) |
+
+**~190 of the 629 lines are this half.** That is the real cost of the gap.
+
+### 2. The glue — JavaScript, no compiler
+
+Everything else is ordinary application code:
+
+| File | Lines | Job |
+| --- | --- | --- |
+| [`src/index.js`](src/index.js) | 196 | Loads the `.node`, parses JSON, drives the pump as an unref'd `setInterval` |
+| [`src/main.js`](src/main.js) | 333 | Electron main: owns the runtime, IPC handlers, headless self-test |
+| [`src/daemon.js`](src/daemon.js) | 241 | 0.2.0 only: supervises a `logosctl` child process |
+| [`src/gateway.js`](src/gateway.js) | 222 | 0.2.0 only: drives the module through `core_service` |
+| [`src/preload.js`](src/preload.js) | 41 | `contextBridge` surface |
+
+### 3. The build and packaging glue
+
+Not FFI, but the part that actually took the longest — see
+[Findings](#findings):
+
+| File | Lines | Job |
+| --- | --- | --- |
+| [`binding.gyp`](binding.gyp) | 39 | node-gyp target; links `logos_core`, `logos_qt_host`, `logos_protocol`, Qt |
+| [`scripts/gyp-config.js`](scripts/gyp-config.js) | 141 | Resolves liblogos + Qt flags (gyp cannot call pkg-config itself) |
+| [`scripts/bundle-runtime.js`](scripts/bundle-runtime.js) | 244 | Walks the `NEEDED` closure, rewrites every `RUNPATH` to `$ORIGIN` |
+
+`bundle-runtime.js` is the one to read if you are packaging Nix-built libraries
+anywhere: every `.so` names its dependencies by absolute `/nix/store` path, so a
+bundle that is merely copied resolves nothing.
+
+### Summary for sizing the work
+
+- **~190 lines of Qt C++** is the irreducible part, and only because
+  `LogosAPI`/`LogosAPIClient` have no C ABI.
+- **~440 lines of C++** are a mechanical C-ABI wrapper any language can replace.
+- **~1,000 lines of JS** are glue with no compiler involved.
+- **~420 lines of build/packaging** glue, mostly rpath surgery for Nix output.
+- Adding in-process calling cost **zero AppImage size** — every library it links
+  was already bundled.
+
 ## Layout
 
 ```
