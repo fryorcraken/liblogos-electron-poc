@@ -1,13 +1,25 @@
 # 0.2.0 — driving the module
 
-> **Reading this cold?** The one-paragraph version: this PoC loads
-> `delivery_module` but never calls it. Calling a module *directly* from a
+> **STATUS: 0.2.0 IS DONE.** The app runs a `logosctl` daemon, drives
+> `delivery_module` through its `core_service` gateway, and a real Waku node
+> reaches `Connected`. `make probe-node` (plain Node) and `make verify-node`
+> (inside Electron, via the app's own IPC handler) both reproduce it; the
+> packaged AppImage ships the daemon. See §"What 0.2.0 ended up being".
+>
+> **One conclusion below turned out to be wrong**, and is left in place because
+> the reasoning that produced it is instructive: "calling a module directly does
+> not work" is true only of **Qt-free** consumers. An in-process C++ caller can
+> invoke a module with `getClient()` + `invokeRemoteMethod()` — no daemon, no
+> gateway, no TCP, no token (`make exp-call`, `docs/0.3.0-inventory.md`). That
+> is what makes 0.3.0 much smaller than §"Option 3 in full" assumed.
+>
+> **Reading this cold?** The one-paragraph version: this PoC loaded
+> `delivery_module` but never called it. Calling a module directly from a
 > Qt-free consumer does not work (§"The mechanism, pinned down"). Going through
-> `core_service` — a gateway module that proxies calls — **does**, and is
-> confirmed end to end from Node (§"Status of that confirmation"). So 0.2.0 is
-> the gateway route with a `logosctl` daemon beside the app, and 0.3.0 hosts
-> that same gateway inside the addon so there is no daemon at all
-> (§"Option 3 in full"). See §"The plan, in two releases".
+> `core_service` — a gateway that proxies calls — **does**, and is confirmed end
+> to end from Node (§"Status of that confirmation"). So 0.2.0 is the gateway
+> route with a `logosctl` daemon beside the app, and 0.3.0 calls modules from
+> the addon directly. See §"The plan, in two releases".
 >
 > Everything below was run, not reasoned. Repro targets:
 > `make probe-transport`, `make probe-sdk`, `make probe-core-service`.
@@ -24,10 +36,84 @@ dependency chain on a machine with no Nix. It never calls the module. 0.2.0 was
 meant to close that gap — `createNode()`, a real Waku node, a log that keeps
 moving.
 
-**Status: not done, and the SDK route was probably the wrong one.** Everything
-up to the last hop works; no invocation completes. What follows is what was
-established by experiment, so the next person does not repeat it — including a
-conclusion that turned out to be wrong.
+**That gap is now closed** — see the next section. What follows it is the
+record of how the route was found, kept because most of it is still the reason
+the design is what it is, and because one of its conclusions was wrong in a way
+worth seeing.
+
+## What 0.2.0 ended up being
+
+The app spawns a `logosctl` daemon, loads `delivery_module` into it, and drives
+that module through the daemon's `core_service` gateway with `logos-js-sdk`.
+`src/daemon.js` supervises the daemon; `src/gateway.js` drives the module.
+
+```
+createNode({"mode":"Core","preset":"logos.test"})
+  createNode -> {"error":null,"success":true,"value":null}
+start() — bringing the Waku node up
+  start -> {"error":null,"success":true,"value":null}
+[event] connectionStateChanged ["Connected",1789652780800796000]
+```
+
+Reproduce with `make probe-node` (plain Node) or `make verify-node` (inside
+Electron, driving the app's real IPC handler so it cannot pass while the button
+is broken). Confirmed in the GUI as well.
+
+### What cost time, and is not obvious from the source
+
+- **`daemon start --detach` works with a piped stdout**, returning in well under
+  a second. A bare `daemon start` does not detach when stdout is not a TTY: it
+  holds the foreground writing the daemon log and never returns. The probe
+  script backgrounds-and-polls because it predates finding `--detach`.
+- **`daemon stop` cannot stop a tcp-only daemon.** The CLI dials the LOCAL
+  endpoint, which this config removes, so `stop` reports `NO_DAEMON` while the
+  daemon is plainly running and holding both ports. An orphan from an earlier
+  run then keeps 7001/7002 and every later start comes up without binding. The
+  app signals the pid `--detach` printed, and kills whatever holds the port
+  before starting. **This is the single nastiest thing here**: the failure looks
+  like a transport bug and is a process-lifecycle one.
+- **A second `daemon start` rotates the token under the first caller.** It stops
+  the previous daemon and rewrites `auto.json`; the earlier client is left with
+  a stale token, which does not error — it hangs. Observed as a 60s timeout on
+  `getStatus` when a headless run and a button click overlapped.
+- **`LOGOSCTL_CONFIG_DIR`** gives the app its own session directory, so it does
+  not collide with a `logosctl` the user runs by hand.
+- **The config shape matters.** `"{}"` is accepted and starts a node that then
+  sits silent — no entry nodes to dial, 0 events in 30s, verified. A `preset`
+  brings its own bootstrap nodes. Keep the object to `mode`/`preset`/
+  `entryLayer`/`*Overrides`: any other bare top-level key (`logLevel` is the
+  easy one to reach for) silently selects the backend's legacy flat config
+  shape. Valid presets are `twn`, `logos.dev`, `logos.test`, `status.prod` —
+  `twn` is RLN-protected and needs a membership this PoC does not have.
+- **There is no `nodeStarted` event**, despite what an earlier draft of this
+  file assumed. `createNode` and `start` are synchronous and return bool. The
+  continuous traffic is `connectionStateChanged`; the full event list is
+  `connectionStateChanged`, `messageReceived`, `messageSent`, `messageError`,
+  `messagePropagated`.
+- **`watchModuleEvents` forwards under one event name.** The daemon re-emits
+  every watched module event as `module_event`, with `[module, event, ...args]`
+  as the payload, so a client subscribes to that and demultiplexes. It also
+  answers `false` for a module that is not loaded, deliberately.
+- **`logosctl` is not statically linked.** It looks like a single binary but is
+  a Nix wrapper over `.logosctl-wrapped`, dynamically linked against the whole
+  Qt closure and setting `QT_PLUGIN_PATH`/`LOGOS_HOST_PATH` to `/nix/store`
+  paths. Packaging it means shipping the wrapped binary, its `lib/`, `modules/`
+  and `modules-pkg/` trees, the Qt plugins Qt dlopens by path, and supplying
+  that environment from the app.
+
+### What is still not done
+
+- **No message is ever sent or received.** `send()` and `subscribe()` are
+  reachable through the same `callModuleMethod` path, but nothing exercises
+  them, so `messageSent` / `messageReceived` have never fired in a run.
+- **Only one `connectionStateChanged` arrives per run** in the windows tested
+  (30–60s): the node reaches `Connected` and then stays there. The log "keeps
+  moving" in the sense that events now arrive at all, which is the thing 0.1.0
+  lacked — but it is one event, not a stream. Sending messages is what would
+  produce continuous traffic.
+- **The bring-up blocks the UI.** The daemon work is async, but the SDK's client
+  creation and `getMethods` are synchronous FFI on the main thread, and the
+  first run installs four packages. The window is unresponsive during it.
 
 ## What works
 
@@ -210,23 +296,25 @@ Two things this reveals that the attempt above got wrong:
 
 ### The plan, in two releases
 
-**0.2.0 — the gateway route.** Confirmed working (above). The app runs a
-`logosctl` daemon alongside it, talks to `core_service` over loopback TCP with
-the SDK, and drives `delivery_module` through `callModuleMethod`. Remaining
-work is wiring, not research:
+**0.2.0 — the gateway route. DONE**; see §"What 0.2.0 ended up being". All four
+steps below were carried out, with two corrections worth recording:
 
-1. Ship `logosctl` in the AppImage and spawn it from Electron's main process
-   (it is statically linked — only `libc` — and carries its own copy of the
-   runtime libraries, so it costs size but no new dependencies).
+1. Ship `logosctl` in the AppImage and spawn it from Electron's main process.
+   ~~(it is statically linked — only `libc`)~~ **Wrong.** It is a Nix wrapper
+   over a dynamically linked binary with the whole Qt closure behind it, and
+   packaging it meant shipping its private `lib/`, `modules/` and
+   `modules-pkg/` trees plus the Qt plugins Qt dlopens by path. 315 MB → 426 MB.
 2. Write its config, start it, read the token from `client/auto.json` **after**
    the daemon boots, and install/load the modules.
 3. Replace the addon's `loadModule` path in the UI with SDK calls through the
-   gateway, then `createNode()` to actually start the Waku node.
-4. Subscribe with `watchModuleEvents` and stream `nodeStarted` /
-   `connectionStateChanged` into the log pane — the continuous activity the log
-   has been missing.
+   gateway, then `createNode()` to actually start the Waku node. (Both buttons
+   are kept, so the 0.1.0 claim stays demonstrable.)
+4. Subscribe with `watchModuleEvents` and stream ~~`nodeStarted` /~~
+   `connectionStateChanged` into the log pane. **There is no `nodeStarted`
+   event** — `createNode`/`start` are synchronous and return bool.
 
-Cost: two processes and a second copy of the runtime in the AppImage.
+Cost: two processes, a second copy of the runtime in the AppImage, and a daemon
+lifecycle the app has to manage — including that `daemon stop` cannot stop it.
 
 **0.3.0 — as a lib.** Host `core_service` in the addon instead, as described
 below, and delete the daemon. Same UI, same SDK surface, one process.
