@@ -58,6 +58,13 @@ jobs:
       - name: Build liblogos
         run: nix build --no-write-lock-file 'github:logos-co/logos-liblogos' -o ./liblogos
 
+      # The 0.2.0 daemon. Without it scripts/bundle-runtime.js skips the daemon
+      # rather than failing, so the AppImage still builds and the 0.1.0 path
+      # still works — but its "Start Waku node" button reports
+      # "logosctl not found", which is not a release anyone wants.
+      - name: Build logosctl
+        run: nix build --no-write-lock-file 'github:logos-co/logos-logoscore-cli#ctl' -o ./logosctl
+
       # --no-write-lock-file: the delivery-module flake carries lock entries Nix
       # wants to refresh, and a flake fetched from GitHub is read-only, so the
       # attempt is a hard error ("cannot write modified lock file"). The flag
@@ -102,6 +109,14 @@ jobs:
       # on a user's machine.
       - name: Verify the AppImage starts delivery_module
         run: xvfb-run --auto-servernum make verify-appimage
+
+      # And the 0.2.0 half: the daemon bundled INSIDE the AppImage brings the
+      # module up. Separate from the check above because it exercises a
+      # different mechanism — logosctl as a child process with its own Qt
+      # closure and plugin paths, rather than the addon's C ABI. Without this a
+      # release could ship a working 0.1.0 path and a dead button.
+      - name: Verify the bundled daemon
+        run: xvfb-run --auto-servernum make verify-appimage-node
 
       - uses: actions/upload-artifact@v4
         with:
