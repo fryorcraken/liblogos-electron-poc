@@ -356,3 +356,10 @@ Honestly accounted for, because 0.3.0 exists to remove all of it:
 `.github/workflows/ci.yml` builds liblogos and every module through Nix, runs
 the headless verification, builds the AppImage, and uploads it as an artifact.
 Pushing a `v*` tag additionally publishes it as a release asset.
+
+**It does not yet build `logosctl`.** `bundle-runtime.js` skips the daemon when
+`./logosctl` is absent rather than failing, so CI still produces a working
+0.1.0-equivalent AppImage — but one whose "Start Waku node" button reports
+`logosctl not found`. Adding `nix build 'github:logos-co/logos-logoscore-cli#ctl'
+-o logosctl` to the workflow is what would close that, and `make verify-node` is
+the check for whether it worked.

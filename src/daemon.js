@@ -290,13 +290,33 @@ class Daemon {
    *  Electron's quit path, where an unresolved promise is simply not awaited, so
    *  a spawned stop that outlives us is better than a hang. */
   stop() {
-    if (!this.started) return;
+    // Keyed on the pid, not on `started`. `started` is set only once the ports
+    // are bound, so a failure between "daemon start returned" and "ports bound"
+    // would otherwise leak the very daemon that is misbehaving.
+    if (!this.started && !this.pid) return;
     this.started = false;
 
-    // The clean path first, even though it is expected to answer NO_DAEMON
-    // under a tcp-only config: if the config is ever changed back to include a
-    // local endpoint, this is the right way to stop it, and it costs one
-    // detached process either way.
+    // THE SIGNAL FIRST, and this order is deliberate.
+    //
+    // stop() runs from Electron's quit path and from process 'exit', where ONLY
+    // synchronous work happens — a spawned child is never reaped, and anything
+    // asynchronous is simply dropped. process.kill is synchronous, so it is the
+    // part that can be relied on. SIGTERM rather than SIGKILL: the daemon owns
+    // logos_host children and should bring them down rather than orphan them.
+    if (this.pid) {
+      try {
+        process.kill(this.pid, 'SIGTERM');
+      } catch {
+        // Already gone, which is the desired end state anyway.
+      }
+      this.pid = null;
+    }
+
+    // Then the clean path, as a belt-and-braces for the case where the pid was
+    // never captured. Expected to answer NO_DAEMON under a tcp-only config (the
+    // CLI dials the local endpoint this config removes), so it is not relied on
+    // — but it is the right way to stop a daemon if the config ever regains a
+    // local endpoint, and it costs one detached process.
     try {
       const child = spawn(this.binary, ['daemon', 'stop'], {
         env: this.env(),
@@ -305,19 +325,7 @@ class Daemon {
       });
       child.unref();
     } catch {
-      // Fall through to the signal.
-    }
-
-    // And the one that actually works here. SIGTERM, not SIGKILL: the daemon
-    // owns logos_host children and a module store, and should be given the
-    // chance to bring them down rather than orphaning them.
-    if (this.pid) {
-      try {
-        process.kill(this.pid, 'SIGTERM');
-      } catch {
-        // Already gone, which is the desired end state anyway.
-      }
-      this.pid = null;
+      // Nothing left to try.
     }
   }
 }

@@ -336,12 +336,18 @@ app.whenReady().then(() => {
   return createWindow();
 });
 
-// THE DAEMON MUST NOT OUTLIVE THE APP. It is a detached child holding two TCP
-// ports and a loaded Waku node; leaving it behind means the next run's
-// `daemon start` refuses (one daemon per session dir) and the ports stay bound.
+// THE DAEMON MUST NOT OUTLIVE THE APP. It is a detached process holding two TCP
+// ports and a loaded Waku node. Leaving it behind is not cosmetic: the next run
+// cannot bind the ports, and because `daemon stop` reports NO_DAEMON for a
+// tcp-only daemon, the orphan is invisible to the obvious way of checking.
 //
-// will-quit, not window-all-closed: the latter does not fire when the app is
-// quit directly, and this has to run on every exit path.
+// FOUR exit paths, because three of them miss at least one case:
+//   window-all-closed  not fired when the app is quit directly
+//   will-quit          NOT fired by app.exit(), which the smoke tests use
+//   exit               fired by app.exit(), and last
+//   process exit/SIGINT  a crash or a Ctrl-C in the terminal
+// A leaked daemon was observed after a headless run precisely because
+// app.exit() skips will-quit.
 function shutdownGateway() {
   if (gateway) {
     try {
@@ -358,6 +364,15 @@ function shutdownGateway() {
 }
 
 app.on('will-quit', shutdownGateway);
+app.on('quit', shutdownGateway);
+// app.exit() emits 'exit' but not 'will-quit', and the smoke tests call it.
+process.on('exit', shutdownGateway);
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    shutdownGateway();
+    process.exit(0);
+  });
+}
 
 app.on('window-all-closed', () => {
   shutdownGateway();
